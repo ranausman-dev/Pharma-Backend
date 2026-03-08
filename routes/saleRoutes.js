@@ -17,5 +17,6 @@ router.get("/get-sale/:orderId", saleController.getSaleById);
 router.get("/all-bookers-sales", saleController.getAllBookersSales);
 router.put("/add-recover", saleController.addRecover);
 router.get("/:customerId", saleController.getSalesByCustomer);
+router.patch("/:orderId/complete", saleController.completeSale);
 
 export default router;

@@ -35,59 +35,20 @@ const createSale = async (req, res) => {
 
     console.log("req.body", req.body);
 
-    // 1. Validate required fields
-    const requiredFields = {
-      invoice_number,
-      supplier_id,
-      subtotal,
-      total,
-      paid_amount,
-      net_value,
-      items,
-    };
-
-    const missingFields = Object.entries(requiredFields)
-      .filter(
-        ([_, value]) => value === undefined || value === null || value === "",
-      )
-      .map(([key]) => key);
-
-    if (missingFields.length > 0) {
-      await session.abortTransaction();
-      return sendError(
-        res,
-        `Missing required fields: ${missingFields.join(", ")}`,
-        400,
-      );
-    }
-
-    // Ensure paid amount is not greater than total
-    // if (Number(paid_amount) > Number(total)) {
-    //   await session.abortTransaction();
-    //   return sendError(res, "Paid amount cannot be greater than total", 400);
-    // }
-
-    // 2. Validate batch numbers
-    for (const item of items) {
-      if (!item.batch || item.batch.trim() === "") {
-        await session.abortTransaction();
-        return sendError(res, `Batch number is required for all items`, 400);
-      }
-    }
-
+    // ✅ Validate type (always)
     if (type !== "sale") {
       await session.abortTransaction();
       return sendError(res, "Invalid order type", 400);
     }
 
-    // 3. Validate supplier (customer) exists
+    // ✅ Validate supplier (always)
     const supplierDoc = await Supplier.findById(supplier_id).session(session);
     if (!supplierDoc) {
       await session.abortTransaction();
       return sendError(res, "Supplier (Customer) not found", 404);
     }
 
-    // 4. Validate booker
+    // ✅ Validate booker (always)
     if (booker_id) {
       const booker = await User.findById(booker_id).session(session);
       if (!booker) {
@@ -96,39 +57,74 @@ const createSale = async (req, res) => {
       }
     }
 
-    // 5. Validate product stock
-    for (const item of items) {
-      const batch = await Batch.findOne({
-        product_id: item.product_id,
-        batch_number: item.batch,
-      }).session(session);
+    // ===== COMPLETED-ONLY VALIDATIONS =====
+    if (status === "completed") {
+      // 1. Validate required fields
+      const requiredFields = {
+        supplier_id,
+        subtotal,
+        total,
+        paid_amount,
+        net_value,
+        items,
+      };
 
-      if (!batch) {
+      const missingFields = Object.entries(requiredFields)
+        .filter(
+          ([_, value]) =>
+            value === undefined ||
+            value === null ||
+            value === "" ||
+            (Array.isArray(value) && value.length === 0),
+        )
+        .map(([key]) => key);
+
+      if (missingFields.length > 0) {
         await session.abortTransaction();
         return sendError(
           res,
-          `Batch ${item.batch} not found for product ${item.product_id}`,
-          404,
-        );
-      }
-
-      if (item.units > batch.stock) {
-        await session.abortTransaction();
-        return sendError(
-          res,
-          `Insufficient stock in batch ${item.batch}. Available: ${batch.stock}`,
+          `Missing required fields: ${missingFields.join(", ")}`,
           400,
         );
       }
+
+      // 2. Validate batch numbers
+      for (const item of items) {
+        if (!item.batch || item.batch.trim() === "") {
+          await session.abortTransaction();
+          return sendError(res, `Batch number is required for all items`, 400);
+        }
+      }
+
+      // 3. Validate product stock
+      for (const item of items) {
+        const batch = await Batch.findOne({
+          product_id: item.product_id,
+          batch_number: item.batch,
+        }).session(session);
+
+        if (!batch) {
+          await session.abortTransaction();
+          return sendError(
+            res,
+            `Batch ${item.batch} not found for product ${item.product_id}`,
+            404,
+          );
+        }
+
+        if (item.units > batch.stock) {
+          await session.abortTransaction();
+          return sendError(
+            res,
+            `Insufficient stock in batch ${item.batch}. Available: ${batch.stock}`,
+            400,
+          );
+        }
+      }
     }
 
-    // 6. Create order with recovery logic
-    // calculate the amount that belongs to this specific sale (without previous balance)
+    // ===== ORDER CREATION (ALWAYS HAPPENS) =====
     const actualDueForOrder = Number(total) - Number(paid_amount);
-
-    // Determine what the final customer balance will be after adding this order
-    // We'll use the same helper to compute updated pay/receive, then use the pay
-    // value as the due_amount that we store on the order (just like purchases).
     const prevPay = supplierDoc.pay || 0;
     const prevReceive = supplierDoc.receive || 0;
     const balanceResult = adjustPayReceive(
@@ -145,8 +141,6 @@ const createSale = async (req, res) => {
       subtotal,
       total,
       paid_amount,
-      // due_amount on the order should represent the customer's balance after
-      // this sale (matching what the frontend sends for purchases)
       due_amount: balanceResult.pay || 0,
       net_value,
       note,
@@ -156,26 +150,16 @@ const createSale = async (req, res) => {
       profit: 0,
     };
 
-    // if (paid_amount >= total) {
-    //   orderData.status = "recovered";
-    //   orderData.recovered_amount = paid_amount;
-    //   orderData.recovered_date = new Date();
-    // } else {
-    //   // Do not mark as completed or skipped
-    //   orderData.recovered_amount = paid_amount || 0;
-    //   orderData.recovered_date = null;
-    // }
-
     const newOrder = await Order.create([orderData], { session });
+    console.log("✅ ORDER CREATED WITH STATUS:", newOrder[0].status); // ADD THIS
+    console.log("✅ ORDER INVOICE:", newOrder[0].invoice_number); // ADD THIS
     if (!newOrder?.length) {
       await session.abortTransaction();
       return sendError(res, "Failed to create order", 500);
     }
 
-    // 7. Order items + batch updates + profit calculation
+    // ===== ORDER ITEMS (ALWAYS HAPPENS) =====
     const orderItems = [];
-    const batchUpdates = [];
-    let totalOrderProfit = 0;
 
     for (const item of items) {
       console.log("item", item);
@@ -185,37 +169,7 @@ const createSale = async (req, res) => {
         return sendError(res, `Product not found: ${item.product_id}`, 404);
       }
 
-      const batch = await Batch.findOne({
-        product_id: item.product_id,
-        batch_number: item.batch,
-      }).session(session);
-
-      if (!batch) {
-        await session.abortTransaction();
-        return sendError(res, `Batch ${item.batch} not found`, 404);
-      }
-
-      // ✅ CORRECT PROFIT CALCULATION (using pre-tax amount)
-      const salePricePerUnitIncludingTax = item.total / item.units;
-      const profitPerUnit = salePricePerUnitIncludingTax - batch.unit_cost;
-      const totalProfitForItem = profitPerUnit * item.units;
-
-      totalOrderProfit += totalProfitForItem;
-
-      // Debug logging
-      // console.log('Profit Calculation Debug:');
-      // console.log('Item total:', item.total);
-      // console.log('Item units:', item.units);
-      // console.log('Item unit_price:', item.unit_price);
-      // console.log('Item discount:', item.discount);
-      // console.log('Batch unit_cost:', batch.unit_cost);
-      // console.log('Profit per unit:', profitPerUnit);
-      // console.log('Total profit for item:', totalProfitForItem);
-
-      let expiryValue = null;
-      if (item.expiry) {
-        expiryValue = item.expiry;
-      }
+      let expiryValue = item.expiry || null;
 
       const calculatedTotal =
         item.units * item.unit_price - (item.discount || 0);
@@ -231,7 +185,7 @@ const createSale = async (req, res) => {
             unit_price: item.unit_price,
             discount: item.discount || 0,
             total: item.total,
-            profit: totalProfitForItem,
+            profit: 0, // Will be updated for completed orders
             total: calculatedTotal,
           },
         ],
@@ -239,6 +193,48 @@ const createSale = async (req, res) => {
       );
 
       orderItems.push(orderItem[0]);
+    }
+
+    // ===== DRAFT HANDLING =====
+    if (status === "skipped") {
+      await session.commitTransaction();
+      session.endSession();
+      return successResponse(
+        res,
+        "Draft sale saved successfully (ready for completion later)",
+        { order: newOrder[0], items: orderItems },
+        201,
+      );
+    }
+
+    // ===== COMPLETED ORDER PROCESSING =====
+    // Everything below only runs for status === "completed"
+
+    const batchUpdates = [];
+    let totalOrderProfit = 0;
+
+    // Process items for completed order
+    for (const item of items) {
+      const batch = await Batch.findOne({
+        product_id: item.product_id,
+        batch_number: item.batch,
+      }).session(session);
+
+      // ✅ CORRECT PROFIT CALCULATION (using pre-tax amount)
+      const salePricePerUnitIncludingTax = item.total / item.units;
+      const profitPerUnit = salePricePerUnitIncludingTax - batch.unit_cost;
+      const totalProfitForItem = profitPerUnit * item.units;
+
+      totalOrderProfit += totalProfitForItem;
+
+      // Update order item with profit
+      await OrderItem.findByIdAndUpdate(
+        orderItems.find(
+          (oi) => oi.product_id.toString() === item.product_id.toString(),
+        )._id,
+        { profit: totalProfitForItem },
+        { session },
+      );
 
       batchUpdates.push({
         updateOne: {
@@ -260,7 +256,6 @@ const createSale = async (req, res) => {
     );
 
     // 8. Adjust supplier balances
-    // the helper is defined earlier above so we can reuse it if needed; leave as-is
     function adjustPayReceive(
       currentPay,
       currentReceive,
@@ -281,7 +276,6 @@ const createSale = async (req, res) => {
       return { pay, receive };
     }
 
-    // update using the amount that belongs to this order only
     const { pay: updatedPay, receive: updatedReceive } = adjustPayReceive(
       prevPay,
       prevReceive,
@@ -1555,6 +1549,375 @@ const deleteSale = async (req, res) => {
   }
 };
 
+// PATCH /sale/:orderId/complete
+export const completeSale = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const sale = await Order.findById(req.params.orderId).session(session);
+    if (!sale) {
+      await session.abortTransaction();
+      return sendError(res, "Sale not found", 404);
+    }
+
+    // 🚫 Already completed
+    if (sale.status === "completed") {
+      await session.commitTransaction();
+      return res.json({ success: true, sale });
+    }
+
+    /* =====================================================
+       1️⃣ Update allowed fields ONLY
+       ===================================================== */
+    const allowedFields = [
+      "subtotal",
+      "total",
+      "paid_amount",
+      "due_amount",
+      "net_value",
+      "note",
+      "due_date",
+      "booker_id",
+    ];
+
+    allowedFields.forEach((field) => {
+      if (req.body[field] !== undefined) {
+        sale[field] = req.body[field];
+      }
+    });
+
+    /* =====================================================
+       2️⃣ Generate next invoice number (SALE format)
+       ===================================================== */
+    // Get ALL completed sale invoices
+    const completedInvoices = await Order.find({
+      status: "completed",
+      type: "sale",
+      invoice_number: { $regex: /^SALE-\d+$/ },
+    })
+      .select("invoice_number")
+      .session(session);
+
+    let maxInvoice = 0;
+
+    for (const doc of completedInvoices) {
+      const num = parseInt(doc.invoice_number.replace("SALE-", ""), 10);
+      if (!isNaN(num) && num > maxInvoice) {
+        maxInvoice = num;
+      }
+    }
+
+    // If last invoice was SAL-10 → next is 11
+    const nextNumber = maxInvoice + 1;
+
+    // Safety check
+    if (!nextNumber || nextNumber <= 0) {
+      await session.abortTransaction();
+      return sendError(
+        res,
+        "Invoice number could not be generated safely",
+        400,
+      );
+    }
+
+    sale.invoice_number = `SALE-${nextNumber}`;
+    sale.status = "completed";
+    sale.profit = 0; // Will be updated after calculation
+
+    /* =====================================================
+       3️⃣ Customer validation & balance update
+       ===================================================== */
+    const customerDoc = await Supplier.findById(sale.supplier_id).session(
+      session,
+    );
+
+    if (!customerDoc) {
+      await session.abortTransaction();
+      return sendError(res, "Customer not found", 404);
+    }
+
+    // Calculate due amount for this order
+    const completedTotal = sale.total || 0;
+    const completedPaid = sale.paid_amount || 0;
+    const actualDueForOrder = completedTotal - completedPaid;
+
+    // Helper function for balance calculation
+    function adjustPayReceive(
+      currentPay,
+      currentReceive,
+      addPay = 0,
+      addReceive = 0,
+    ) {
+      let pay = currentPay + addPay;
+      let receive = currentReceive + addReceive;
+
+      if (pay > receive) {
+        pay = pay - receive;
+        receive = 0;
+      } else {
+        receive = receive - pay;
+        pay = 0;
+      }
+
+      return { pay, receive };
+    }
+
+    const { pay: updatedPay, receive: updatedReceive } = adjustPayReceive(
+      customerDoc.pay || 0,
+      customerDoc.receive || 0,
+      actualDueForOrder,
+      0,
+    );
+
+    await Supplier.findByIdAndUpdate(
+      sale.supplier_id,
+      { pay: updatedPay, receive: updatedReceive },
+      { session },
+    );
+
+    /* =====================================================
+       4️⃣ Items & batch stock updates with profit calculation
+       ===================================================== */
+    const { items = [] } = req.body;
+    const orderItems = [];
+    const batchUpdates = [];
+    let totalOrderProfit = 0;
+
+    for (const item of items) {
+      // Validate product exists
+      const product = await Product.findById(item.product_id).session(session);
+      if (!product) {
+        await session.abortTransaction();
+        return sendError(res, `Product not found: ${item.product_id}`, 404);
+      }
+
+      // Validate batch exists and has sufficient stock
+      const batch = await Batch.findOne({
+        product_id: item.product_id,
+        batch_number: item.batch,
+      }).session(session);
+
+      if (!batch) {
+        await session.abortTransaction();
+        return sendError(
+          res,
+          `Batch ${item.batch} not found for product ${item.product_id}`,
+          404,
+        );
+      }
+
+      if (item.units > batch.stock) {
+        await session.abortTransaction();
+        return sendError(
+          res,
+          `Insufficient stock in batch ${item.batch}. Available: ${batch.stock}`,
+          400,
+        );
+      }
+
+      const expiryValue = item.expiry || null;
+
+      // Find or create order item
+      let orderItem = await OrderItem.findOne({
+        order_id: sale._id,
+        product_id: item.product_id,
+        batch: item.batch,
+      }).session(session);
+
+      // Calculate profit for this item
+      const salePricePerUnitIncludingTax = item.total / item.units;
+      const profitPerUnit = salePricePerUnitIncludingTax - batch.unit_cost;
+      const totalProfitForItem = profitPerUnit * item.units;
+      totalOrderProfit += totalProfitForItem;
+
+      if (orderItem) {
+        // Update existing order item
+        orderItem.units = item.units;
+        orderItem.unit_price = item.unit_price;
+        orderItem.discount = item.discount || 0;
+        orderItem.total = item.total;
+        orderItem.expiry = expiryValue;
+        orderItem.profit = totalProfitForItem;
+        await orderItem.save({ session });
+      } else {
+        // Create new order item
+        [orderItem] = await OrderItem.create(
+          [
+            {
+              order_id: sale._id,
+              product_id: item.product_id,
+              batch: item.batch,
+              expiry: expiryValue,
+              units: item.units,
+              unit_price: item.unit_price,
+              discount: item.discount || 0,
+              total: item.total,
+              profit: totalProfitForItem,
+            },
+          ],
+          { session },
+        );
+      }
+
+      orderItems.push(orderItem);
+
+      // Prepare batch stock update (reduce stock)
+      batchUpdates.push({
+        updateOne: {
+          filter: { product_id: item.product_id, batch_number: item.batch },
+          update: { $inc: { stock: -item.units } },
+        },
+      });
+    }
+
+    // Execute batch stock updates
+    if (batchUpdates.length) {
+      await Batch.bulkWrite(batchUpdates, { session });
+    }
+
+    // Update sale with total profit
+    sale.profit = totalOrderProfit;
+    await sale.save({ session });
+
+    /* =====================================================
+       5️⃣ Investor Profit Sharing (same as createSale)
+       ===================================================== */
+    const grossSale = sale.total;
+    const expense = grossSale * 0.02;
+    const profit = totalOrderProfit;
+    const charity = profit * 0.1;
+    const distributable = profit - charity - expense;
+
+    const investors = await Investor.find({ status: "active" }).session(
+      session,
+    );
+    const today = new Date();
+    const monthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+
+    let totalGivenToInvestors = 0;
+    let companyRecord = null;
+
+    // Loop investors
+    for (const inv of investors) {
+      console.log("Checking investor:", inv.name, "Join date:", inv.join_date);
+
+      const joinDate = new Date(inv.join_date);
+      let eligible = false;
+
+      if (joinDate <= new Date(today.getFullYear(), today.getMonth(), 1)) {
+        eligible = true;
+      } else if (
+        joinDate.getDate() <= 15 &&
+        joinDate.getMonth() === today.getMonth() &&
+        joinDate.getFullYear() === today.getFullYear()
+      ) {
+        eligible = today.getDate() >= 15;
+      }
+
+      console.log("Eligible?", eligible);
+
+      if (!eligible) continue;
+
+      // Investor gets exactly profit_percentage% of total distributable profit
+      const invShare = (distributable * (inv.profit_percentage || 0)) / 100;
+
+      // Company gets the rest from this investor's allocation
+      const companyShare = (distributable * (inv.shares || 0)) / 100 - invShare;
+
+      console.log("Distributable:", distributable);
+      console.log(
+        "Investor:",
+        inv.name,
+        "Shares:",
+        inv.shares,
+        "Profit %:",
+        inv.profit_percentage,
+      );
+      console.log("InvShare:", invShare);
+      console.log("Company gets from this investor:", companyShare);
+
+      totalGivenToInvestors += invShare;
+
+      // Save investor profit record
+      await investorProfit.create(
+        [
+          {
+            investor_id: inv._id,
+            month: monthKey,
+            order_id: sale._id,
+            sales: grossSale,
+            gross_profit: profit,
+            expense,
+            charity,
+            net_profit: distributable,
+            investor_share: invShare,
+            owner_share: companyShare,
+            total: grossSale,
+          },
+        ],
+        { session },
+      );
+
+      inv.credit = (inv.credit || 0) + invShare;
+      await inv.save({ session });
+
+      // Add the company share to company record
+      if (companyRecord) {
+        companyRecord.credit = (companyRecord.credit || 0) + companyShare;
+      }
+    }
+
+    // Finally, add company's own direct share
+    if (companyRecord) {
+      const companyOwnShare = (distributable * companyRecord.shares) / 100;
+      const totalCompanyShare = companyOwnShare + (companyRecord.credit || 0);
+
+      await investorProfit.create(
+        [
+          {
+            investor_id: companyRecord._id,
+            month: monthKey,
+            order_id: sale._id,
+            sales: grossSale,
+            gross_profit: profit,
+            expense,
+            charity,
+            net_profit: distributable,
+            investor_share: 0,
+            owner_share: companyOwnShare,
+            total: grossSale,
+          },
+        ],
+        { session },
+      );
+
+      companyRecord.credit = totalCompanyShare;
+      await companyRecord.save({ session });
+    }
+
+    /* =====================================================
+       6️⃣ Save & commit
+       ===================================================== */
+    await session.commitTransaction();
+
+    return res.json({
+      success: true,
+      message: "Sale completed successfully",
+      sale,
+      items: orderItems,
+      distributable,
+      total_profit: totalOrderProfit,
+    });
+  } catch (err) {
+    await session.abortTransaction();
+    console.error("Complete sale error:", err);
+    return sendError(res, err.message || "Something went wrong");
+  } finally {
+    session.endSession();
+  }
+};
+
 // Export all like you mentioned
 const saleController = {
   createSale,
@@ -1570,6 +1933,7 @@ const saleController = {
   getAllBookersSales,
   deleteSale,
   getLastSaleTransactionByProduct,
+  completeSale,
 };
 
 export default saleController;
