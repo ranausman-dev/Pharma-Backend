@@ -10,7 +10,7 @@ const createFreeSale = async (req, res) => {
     try {
         await session.startTransaction();
 
-        const { invoice_number, product_id, desc_id, sale_person, batch, expiry, quantity, sub_total } = req.body;
+        const { invoice_number, product_id, desc_id, sale_person, sale_date, batch, expiry, quantity, sub_total } = req.body;
 
         // Validate required fields
         if (!product_id || !quantity) {
@@ -65,8 +65,18 @@ const createFreeSale = async (req, res) => {
 
         let formattedExpiry = null;
         if (expiry) {
-            const [month, year] = expiry.split("/"); // "11/2012"
-            formattedExpiry = new Date(`${year}-${month}-01`);
+            const parts = expiry.split("/");
+            if (parts.length === 2) {
+                let [month, year] = parts;
+                // Handle MM/YY (2-digit year) → expand to YYYY
+                if (year.length === 2) {
+                    year = `20${year}`;
+                }
+                const parsed = new Date(`${year}-${month.padStart(2, "0")}-01`);
+                if (!isNaN(parsed.getTime())) {
+                    formattedExpiry = parsed;
+                }
+            }
         }
 
         // Create the sale record
@@ -75,7 +85,7 @@ const createFreeSale = async (req, res) => {
             product_id,
             desc_id,
             sale_person,
-            sale_date: new Date(),
+            sale_date,
             batch,
             expiry: formattedExpiry,
             quantity,
@@ -101,31 +111,31 @@ const createFreeSale = async (req, res) => {
 };
 
 const getAllFreeSales = async (req, res) => {
-  try {
-    const freeSales = await FreeSale.find()
-      .populate({
-        path: "product_id",
-        select: "name sales_tax sales_tax_percentage pack_size_id",
-        populate: {
-          path: "pack_size_id",
-          model: "PackSize",
-          select: "name"
-        }
-      })
-      .populate({
-        path: "desc_id",
-        select: "desc createdAt updatedAt"
-      })
-      .sort({ createdAt: -1 }); // keep recent first
+    try {
+        const freeSales = await FreeSale.find()
+            .populate({
+                path: "product_id",
+                select: "name sales_tax sales_tax_percentage pack_size_id",
+                populate: {
+                    path: "pack_size_id",
+                    model: "PackSize",
+                    select: "name"
+                }
+            })
+            .populate({
+                path: "desc_id",
+                select: "desc createdAt updatedAt"
+            })
+            .sort({ createdAt: -1 }); // keep recent first
 
-    return successResponse(res, "Free sales fetched successfully", {
-      freeSales: freeSales,
-      totalItems: freeSales.length
-    });
-  } catch (error) {
-    console.error("Get Free Sales Error:", error);
-    return sendError(res, "Failed to fetch free sales", 500);
-  }
+        return successResponse(res, "Free sales fetched successfully", {
+            freeSales: freeSales,
+            totalItems: freeSales.length
+        });
+    } catch (error) {
+        console.error("Get Free Sales Error:", error);
+        return sendError(res, "Failed to fetch free sales", 500);
+    }
 };
 
 

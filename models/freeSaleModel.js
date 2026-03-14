@@ -18,7 +18,7 @@ const freeSaleSchema = new mongoose.Schema(
             required: true,
         },
         sale_date: {
-            type: Date,
+            type: String,
             default: null,
         },
         batch: {

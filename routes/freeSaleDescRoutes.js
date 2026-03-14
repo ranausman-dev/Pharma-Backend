@@ -1,6 +1,6 @@
 
 import express from "express";
-import freeSaleDescController from "../controllers/freeSaleSDescController.js";
+import freeSaleDescController from "../controllers/freeSaleDescController.js";
 
 const router = express.Router();
 

@@ -466,10 +466,15 @@ const getAllSales = async (req, res) => {
   try {
     // Fetch all sales with supplier and booker populated
     const sales = await Order.find({ type: "sale" })
-      .populate(
-        "supplier_id",
-        "company_name role address city phone_number pay receive",
-      )
+      .populate({
+        path: "supplier_id",
+        select: "company_name role address city phone_number pay receive area_id",
+        populate: {
+          path: "area_id",
+          model: "Area",
+          select: "name",
+        },
+      })
       .populate("booker_id", "name")
       .sort({ createdAt: -1 })
       .lean();
@@ -479,12 +484,19 @@ const getAllSales = async (req, res) => {
     const orderItems = await OrderItem.find({ order_id: { $in: saleIds } })
       .populate({
         path: "product_id",
-        select: "name sales_tax sales_tax_percentage pack_size_id",
-        populate: {
-          path: "pack_size_id",
-          model: "PackSize",
-          select: "name",
-        },
+        select: "name sales_tax sales_tax_percentage pack_size_id product_type",
+        populate: [
+          {
+            path: "pack_size_id",
+            model: "PackSize",
+            select: "name",
+          },
+          {
+            path: "product_type",
+            model: "ProductType",
+            select: "name",
+          },
+        ],
       })
       .lean();
 
@@ -652,9 +664,9 @@ const getProductSales = async (req, res) => {
       stockData.length > 0
         ? stockData[0]
         : {
-            totalStock: 0,
-            productIn: 0,
-          };
+          totalStock: 0,
+          productIn: 0,
+        };
 
     return successResponse(res, "Product sales fetched successfully", {
       sales: orderItems,

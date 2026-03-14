@@ -23,7 +23,7 @@ export const getAllFreeSaleDesc = async (req, res) => {
         const hasMore = page < totalPages;
 
         return successResponse(res, "Free sale descriptions fetched successfully", {
-            freeSaleDescs, 
+            freeSaleDescs,
             currentPage: page,
             totalPages,
             totalItems: total,
@@ -40,28 +40,28 @@ export const getAllFreeSaleDesc = async (req, res) => {
 export const createFreeSaleDesc = async (req, res) => {
     try {
         const { desc } = req.body;
-        
+
         // Validate input
         if (!desc || typeof desc !== 'string' || desc.trim() === '') {
             return sendError(res, "Description is required and must be a non-empty string", 400);
         }
 
         // Check for existing description (case-insensitive)
-        const existingDesc = await FreeSaleDesc.findOne({ 
-            desc: { $regex: `^${desc.trim()}$`, $options: "i" } 
+        const existingDesc = await FreeSaleDesc.findOne({
+            desc: { $regex: `^${desc.trim()}$`, $options: "i" }
         });
-        
+
         if (existingDesc) {
             return sendError(res, "Description already exists", 409);
         }
 
         // Create new description
-        const newDesc = await FreeSaleDesc.create({ 
-            desc: desc.trim() 
+        const newDesc = await FreeSaleDesc.create({
+            desc: desc.trim()
         });
 
-        return successResponse(res, "Description created successfully", { 
-            description: newDesc  
+        return successResponse(res, "Description created successfully", {
+            description: newDesc
         }, 201);
     } catch (error) {
         console.error("Create Description Error:", error);
