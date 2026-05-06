@@ -677,8 +677,8 @@ const returnPurchaseByInvoice = async (req, res) => {
       const { orderItem, returnTotal } = orderItemsMap[item.batch];
 
       // Deduct units from original order item
-      orderItem.units -= item.units;
-      await orderItem.save({ session });
+      // orderItem.units -= item.units;
+      // await orderItem.save({ session });
 
       // Create return order item
       const returnOrderItem = await OrderItem.create(

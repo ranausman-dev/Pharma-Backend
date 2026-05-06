@@ -227,10 +227,12 @@ const createSale = async (req, res) => {
 
       totalOrderProfit += totalProfitForItem;
 
-      // Update order item with profit
+      // Update order item with profit (match by product_id AND batch to handle same product in multiple batches)
       await OrderItem.findByIdAndUpdate(
         orderItems.find(
-          (oi) => oi.product_id.toString() === item.product_id.toString(),
+          (oi) =>
+            oi.product_id.toString() === item.product_id.toString() &&
+            oi.batch === item.batch,
         )._id,
         { profit: totalProfitForItem },
         { session },
@@ -839,14 +841,19 @@ const returnSaleByInvoice = async (req, res) => {
 
     const returnItems = [];
     const batchUpdates = [];
+    let returnedProfit = 0;
 
     // Process each return item
     for (const item of items) {
       const { orderItem, returnTotal } = orderItemsMap[item.batch];
 
       // Deduct units from original order item
-      orderItem.units -= item.units;
-      await orderItem.save({ session });
+      // orderItem.units -= item.units;
+      // await orderItem.save({ session });
+
+      // Calculate proportional profit being returned
+      const profitPerUnit = orderItem.units > 0 ? (orderItem.profit || 0) / orderItem.units : 0;
+      returnedProfit += profitPerUnit * item.units;
 
       // Create return order item
       const returnOrderItem = await OrderItem.create(
@@ -877,6 +884,13 @@ const returnSaleByInvoice = async (req, res) => {
     }
 
     if (batchUpdates.length) await Batch.bulkWrite(batchUpdates, { session });
+
+    // ✅ Deduct returned amount and profit from original sale order
+    await Order.findByIdAndUpdate(
+      saleOrder._id,
+      { $inc: { total: -totalReturn, profit: -returnedProfit } },
+      { session },
+    );
 
     await session.commitTransaction();
 
