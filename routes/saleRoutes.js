@@ -8,6 +8,7 @@ router.post("/", saleController.createSale);
 router.get("/", saleController.getAllSales);
 router.get("/product-sales/:productId", saleController.getProductSales);
 router.get("/transactions/last", saleController.getLastSaleTransactionByProduct);
+router.put("/:orderId", saleController.editSale);
 router.delete("/:orderId", saleController.deleteSale);
 router.get("/return/search", saleController.getSaleForReturn);
 router.post("/return", saleController.returnSaleByInvoice);

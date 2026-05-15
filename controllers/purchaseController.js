@@ -1052,14 +1052,13 @@ const editPurchase = async (req, res) => {
   try {
     const { orderId } = req.params;
 
-    // 🔸 Validate order ID
     if (!mongoose.Types.ObjectId.isValid(orderId)) {
       await session.abortTransaction();
       return sendError(res, "Invalid order ID", 400);
     }
 
-    // 🔸 Fetch existing order
     const order = await Order.findById(orderId).session(session);
+
     if (!order) {
       await session.abortTransaction();
       return sendError(res, "Purchase not found", 404);
@@ -1070,85 +1069,132 @@ const editPurchase = async (req, res) => {
       return sendError(res, "Not a purchase order", 400);
     }
 
-    // 🔹 Reverse old stock
-    const oldItems = await OrderItem.find({ order_id: orderId }).session(
-      session
-    );
+    const getIdString = (value) => {
+      if (!value) return null;
+      if (value._id) return value._id.toString();
+      return value.toString();
+    };
+
+    const isSameAmount = (a, b) => Number(a || 0).toFixed(2) === Number(b || 0).toFixed(2);
+
+    const oldSupplierId = getIdString(order.supplier_id);
+    const newSupplierId = getIdString(req.body.supplier_id || order.supplier_id);
+
+    if (!newSupplierId || !mongoose.Types.ObjectId.isValid(newSupplierId)) {
+      await session.abortTransaction();
+      return sendError(res, "Invalid supplier ID", 400);
+    }
+
+    const supplierExists = await SupplierModel.findById(newSupplierId).session(session);
+    if (!supplierExists) {
+      await session.abortTransaction();
+      return sendError(res, "Supplier not found", 404);
+    }
+
+    const oldTotal = Number(order.total) || 0;
+    const oldPaidAmount = Number(order.paid_amount) || 0;
+    const oldDue = Number(order.due_amount) || 0;
+
+    const newTotal = Number(req.body.total ?? order.total) || 0;
+    const newPaidAmount = Number(req.body.paid_amount ?? order.paid_amount) || 0;
+
+    const isFinancialSame =
+      isSameAmount(oldTotal, newTotal) &&
+      isSameAmount(oldPaidAmount, newPaidAmount);
+
+    // ✅ IMPORTANT FIX:
+    // If user saved edit page without changing total or paid amount,
+    // keep old due amount. Do not trust frontend recalculated due.
+    const newDue = isFinancialSame
+      ? oldDue
+      : Number(req.body.due_amount ?? (newTotal - newPaidAmount)) || 0;
+
+    const dueDiff = newDue - oldDue;
+
+    console.log("📊 Purchase Edit Balance Debug:", {
+      oldSupplierId,
+      newSupplierId,
+      oldTotal,
+      newTotal,
+      oldPaidAmount,
+      newPaidAmount,
+      oldDue,
+      newDue,
+      dueDiff,
+      isFinancialSame,
+      supplierChanged: oldSupplierId !== newSupplierId,
+    });
+
+    // ✅ Reverse old stock
+    const oldItems = await OrderItem.find({ order_id: orderId }).session(session);
+
     for (const item of oldItems) {
       await Batch.findOneAndUpdate(
-        { product_id: item.product_id, batch_number: item.batch },
-        { $inc: { stock: -item.units } },
+        {
+          product_id: item.product_id,
+          batch_number: item.batch,
+        },
+        {
+          $inc: { stock: -Number(item.units || 0) },
+        },
         { session }
       );
     }
 
-    // 🔹 Delete old items
     await OrderItem.deleteMany({ order_id: orderId }).session(session);
 
-    // 🧾 Supplier balance update (based on due amount)
-    const oldSupplierId = order.supplier_id;
-    const newSupplierId = req.body.supplier_id ?? oldSupplierId;
-
-    const oldDue = Number(order.due_amount) || 0;
-    const newDue = Number(req.body.due_amount) || oldDue;
-    const dueDiff = newDue - oldDue;
-
-    console.log("📊 Supplier balance update section:");
-    console.log("Old Supplier ID:", oldSupplierId?.toString());
-    console.log("New Supplier ID:", newSupplierId?.toString());
-    console.log("Old Due Amount:", oldDue);
-    console.log("New Due Amount:", newDue);
-    console.log("💰 Due Difference (affects supplier balance):", dueDiff);
-
-    if (oldSupplierId.toString() !== newSupplierId.toString()) {
-      // 🔁 Supplier changed: reverse old due and add new one
+    // ✅ Supplier balance adjustment
+    if (oldSupplierId !== newSupplierId) {
       if (oldSupplierId) {
         await SupplierModel.findByIdAndUpdate(
           oldSupplierId,
-          { $inc: { receive: dueDiff } },
+          { $inc: { receive: -oldDue } },
           { session }
         );
-        console.log(`↩️ Reversed old supplier balance by: -${oldDue}`);
       }
 
-      if (newSupplierId) {
-        await SupplierModel.findByIdAndUpdate(
-          newSupplierId,
-          { $inc: { receive: newDue } },
-          { session }
-        );
-        console.log(`➕ Added new supplier balance by: +${newDue}`);
-      }
+      await SupplierModel.findByIdAndUpdate(
+        newSupplierId,
+        { $inc: { receive: newDue } },
+        { session }
+      );
     } else {
-      // 🧾 Same supplier → adjust by due difference
       await SupplierModel.findByIdAndUpdate(
         oldSupplierId,
         { $inc: { receive: dueDiff } },
         { session }
       );
-      console.log(`🔄 Adjusted same supplier balance by: ${dueDiff}`);
     }
 
-    // 🔹 Update order details
-    Object.keys(req.body).forEach((key) => {
-      order[key] = req.body[key];
-    });
+    // ✅ Update order
+    order.invoice_number = req.body.invoice_number ?? order.invoice_number;
+    order.purchase_number = req.body.purchase_number ?? order.purchase_number;
     order.supplier_id = newSupplierId;
+    order.subtotal = req.body.subtotal ?? order.subtotal;
+    order.total = newTotal;
+    order.paid_amount = newPaidAmount;
+    order.due_amount = newDue;
+    order.net_value = req.body.net_value ?? order.net_value;
+    order.due_date = req.body.due_date ?? order.due_date;
+    order.note = req.body.note ?? order.note;
+    order.status = req.body.status ?? order.status;
+
     await order.save({ session });
 
-    // 🔹 Recreate order items and update batches
+    // ✅ Recreate new items and add stock
     const newItems = [];
+
     if (Array.isArray(req.body.items)) {
       const batchUpdates = [];
 
       for (const item of req.body.items) {
-        const newItem = await OrderItem.create(
+        const [newItem] = await OrderItem.create(
           [
             {
               order_id: order._id,
               product_id: item.product_id,
               batch: item.batch,
-              expiry: item.expiry,
+              expiry: item.expiry || null,
               units: item.units,
               unit_price: item.unit_price,
               discount: item.discount || 0,
@@ -1158,59 +1204,76 @@ const editPurchase = async (req, res) => {
           { session }
         );
 
-        newItems.push(newItem[0]);
+        newItems.push(newItem);
 
-        // 🔹 Check if same batch already exists to merge discounts/costs
         const existingBatch = await Batch.findOne({
           product_id: item.product_id,
           batch_number: item.batch,
         }).session(session);
 
+        const expiryValue = item.expiry || null;
+
+        const newDiscountPerUnit =
+          Number(item.units || 0) > 0
+            ? Number(item.discount || 0) / Number(item.units)
+            : 0;
+
+        const newDiscountPercentage =
+          Number(item.unit_price || 0) > 0
+            ? (newDiscountPerUnit / Number(item.unit_price)) * 100
+            : 0;
+
         if (existingBatch) {
-          // 🔹 Same Batch: Calculate weighted average for merge
-          const oldStock = existingBatch.stock || 0;
-          const newStock = item.units || 0;
+          const oldStock = Number(existingBatch.stock || 0);
+          const newStock = Number(item.units || 0);
           const totalStock = oldStock + newStock;
 
-          const oldDiscountTotal = (existingBatch.discount_per_unit || 0) * oldStock;
-          const newDiscountTotal = item.discount || 0;
-          const mergedDiscountPerUnit = totalStock > 0 ? (oldDiscountTotal + newDiscountTotal) / totalStock : 0;
+          const oldCostTotal = Number(existingBatch.unit_cost || 0) * oldStock;
+          const newCostTotal = Number(item.total || 0);
 
-          const oldCostTotal = (existingBatch.unit_cost || 0) * oldStock;
-          const newCostTotal = item.total || 0;
-          const mergedUnitCost = totalStock > 0 ? (oldCostTotal + newCostTotal) / totalStock : 0;
+          const mergedUnitCost =
+            totalStock > 0 ? (oldCostTotal + newCostTotal) / totalStock : 0;
 
           batchUpdates.push({
             updateOne: {
-              filter: { product_id: item.product_id, batch_number: item.batch },
+              filter: {
+                product_id: item.product_id,
+                batch_number: item.batch,
+              },
               update: {
                 $set: {
-                  unit_cost: mergedUnitCost,
-                  discount_per_unit: mergedDiscountPerUnit,
-                  expiry_date: item.expiry || existingBatch.expiry_date,
+                  unit_cost: Number(mergedUnitCost.toFixed(2)),
+                  discount_per_unit: Number(newDiscountPerUnit.toFixed(2)),
+                  discount_percentage: Number(newDiscountPercentage.toFixed(2)),
+                  expiry_date: expiryValue || existingBatch.expiry_date,
                 },
-                $inc: { stock: item.units },
+                $inc: { stock: Number(item.units || 0) },
               },
             },
           });
         } else {
-          // 🔹 New Batch: Fresh insert
           batchUpdates.push({
             updateOne: {
-              filter: { product_id: item.product_id, batch_number: item.batch },
+              filter: {
+                product_id: item.product_id,
+                batch_number: item.batch,
+              },
               update: {
                 $setOnInsert: {
                   product_id: item.product_id,
                   batch_number: item.batch,
                   purchase_price: item.unit_price,
-                  expiry_date: item.expiry,
                 },
                 $set: {
-                  unit_cost: item.units > 0 ? item.total / item.units : 0,
-                  discount_per_unit:
-                    item.units > 0 ? (item.discount || 0) / item.units : 0,
+                  unit_cost:
+                    Number(item.units || 0) > 0
+                      ? Number(item.total || 0) / Number(item.units)
+                      : 0,
+                  discount_per_unit: Number(newDiscountPerUnit.toFixed(2)),
+                  discount_percentage: Number(newDiscountPercentage.toFixed(2)),
+                  expiry_date: expiryValue,
                 },
-                $inc: { stock: item.units },
+                $inc: { stock: Number(item.units || 0) },
               },
               upsert: true,
             },
@@ -1225,18 +1288,20 @@ const editPurchase = async (req, res) => {
 
     await session.commitTransaction();
 
-    console.log(
-      "✅ Purchase edited successfully (due-based supplier balance updated)."
-    );
-
     return successResponse(res, "Purchase updated successfully", {
       order,
       items: newItems,
+      supplier_balance_adjustment: {
+        old_due: oldDue,
+        new_due: newDue,
+        difference: dueDiff,
+        is_financial_same: isFinancialSame,
+      },
     });
   } catch (error) {
     await session.abortTransaction();
     console.error("❌ Edit purchase error:", error);
-    return sendError(res, "Failed to edit purchase");
+    return sendError(res, error.message || "Failed to edit purchase");
   } finally {
     session.endSession();
   }

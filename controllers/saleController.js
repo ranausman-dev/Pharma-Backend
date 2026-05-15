@@ -1181,7 +1181,7 @@ const getSaleById = async (req, res) => {
 
     // Fetch the sale order
     const saleOrder = await Order.findById(orderId)
-      .populate("supplier_id", "company_name owner1_name role") // attach customer info
+      .populate("supplier_id", "company_name owner1_name role pay receive") // attach customer info with balance
       .populate("booker_id", "name") // attach booker info
       .lean();
 
@@ -1944,6 +1944,274 @@ export const completeSale = async (req, res) => {
   }
 };
 
+// ✅ Edit / Update Sale
+const editSale = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { orderId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(orderId)) {
+      await session.abortTransaction();
+      return sendError(res, "Invalid order ID", 400);
+    }
+
+    const sale = await Order.findById(orderId).session(session);
+
+    if (!sale) {
+      await session.abortTransaction();
+      return sendError(res, "Sale not found", 404);
+    }
+
+    if (sale.type !== "sale") {
+      await session.abortTransaction();
+      return sendError(res, "Not a sale order", 400);
+    }
+
+    const getIdString = (value) => {
+      if (!value) return null;
+      if (value._id) return value._id.toString();
+      return value.toString();
+    };
+
+    const normalizePayReceive = (pay = 0, receive = 0) => {
+      pay = Number(pay) || 0;
+      receive = Number(receive) || 0;
+
+      if (pay > receive) {
+        return { pay: Number((pay - receive).toFixed(2)), receive: 0 };
+      }
+
+      if (receive > pay) {
+        return { pay: 0, receive: Number((receive - pay).toFixed(2)) };
+      }
+
+      return { pay: 0, receive: 0 };
+    };
+
+    const applySaleDue = async (customerId, amount) => {
+      const customer = await Supplier.findById(customerId).session(session);
+      if (!customer) throw new Error("Customer not found");
+
+      const result = normalizePayReceive(
+        Number(customer.pay || 0) + Number(amount || 0),
+        Number(customer.receive || 0)
+      );
+
+      await Supplier.findByIdAndUpdate(
+        customerId,
+        { pay: result.pay, receive: result.receive },
+        { session }
+      );
+
+      return result;
+    };
+
+    const reverseSaleDue = async (customerId, amount) => {
+      const customer = await Supplier.findById(customerId).session(session);
+      if (!customer) throw new Error("Customer not found");
+
+      const result = normalizePayReceive(
+        Number(customer.pay || 0),
+        Number(customer.receive || 0) + Number(amount || 0)
+      );
+
+      await Supplier.findByIdAndUpdate(
+        customerId,
+        { pay: result.pay, receive: result.receive },
+        { session }
+      );
+
+      return result;
+    };
+
+    const oldCustomerId = getIdString(sale.supplier_id);
+    const newCustomerId = getIdString(req.body.supplier_id || sale.supplier_id);
+
+    if (!newCustomerId || !mongoose.Types.ObjectId.isValid(newCustomerId)) {
+      await session.abortTransaction();
+      return sendError(res, "Invalid customer ID", 400);
+    }
+
+    const customerExists = await Supplier.findById(newCustomerId).session(session);
+    if (!customerExists) {
+      await session.abortTransaction();
+      return sendError(res, "Customer not found", 404);
+    }
+
+    const oldTotal = Number(sale.total) || 0;
+    const oldPaidAmount = Number(sale.paid_amount) || 0;
+    const oldInvoiceDue = Math.max(0, oldTotal - oldPaidAmount);
+
+    const newTotal = Number(req.body.total ?? sale.total) || 0;
+    const newPaidAmount = Number(req.body.paid_amount ?? sale.paid_amount) || 0;
+    const newInvoiceDue = Math.max(0, newTotal - newPaidAmount);
+
+    const dueDiff = newInvoiceDue - oldInvoiceDue;
+
+    // ✅ Reverse old stock
+    const oldItems = await OrderItem.find({ order_id: orderId }).session(session);
+
+    for (const item of oldItems) {
+      await Batch.findOneAndUpdate(
+        {
+          product_id: item.product_id,
+          batch_number: item.batch,
+        },
+        {
+          $inc: { stock: Number(item.units || 0) },
+        },
+        { session }
+      );
+    }
+
+    await OrderItem.deleteMany({ order_id: orderId }).session(session);
+
+    // ✅ Customer debit/credit adjustment
+    if (oldCustomerId !== newCustomerId) {
+      if (oldCustomerId) {
+        await reverseSaleDue(oldCustomerId, oldInvoiceDue);
+      }
+
+      await applySaleDue(newCustomerId, newInvoiceDue);
+    } else {
+      if (dueDiff > 0) {
+        await applySaleDue(oldCustomerId, dueDiff);
+      } else if (dueDiff < 0) {
+        await reverseSaleDue(oldCustomerId, Math.abs(dueDiff));
+      }
+    }
+
+    const updatedCustomerAfterBalance = await Supplier.findById(newCustomerId).session(session);
+
+    // ✅ Update sale header
+    sale.invoice_number = req.body.invoice_number ?? sale.invoice_number;
+    sale.supplier_id = newCustomerId;
+    sale.booker_id = req.body.booker_id ?? sale.booker_id;
+    sale.subtotal = req.body.subtotal ?? sale.subtotal;
+    sale.total = newTotal;
+    sale.paid_amount = newPaidAmount;
+
+    // ✅ Your business rule:
+    // Sale table due amount = customer total debit after this sale
+    sale.due_amount = Number(updatedCustomerAfterBalance?.pay || 0);
+
+    sale.net_value = req.body.net_value ?? sale.net_value;
+    sale.due_date = req.body.due_date ?? sale.due_date;
+    sale.note = req.body.note ?? sale.note;
+    sale.status = req.body.status ?? sale.status;
+
+    await sale.save({ session });
+
+    // ✅ Recreate items, deduct stock, compute profit
+    const newItems = [];
+    const batchUpdates = [];
+    let totalOrderProfit = 0;
+
+    if (Array.isArray(req.body.items)) {
+      for (const item of req.body.items) {
+        const product = await Product.findById(item.product_id).session(session);
+
+        if (!product) {
+          await session.abortTransaction();
+          return sendError(res, `Product not found: ${item.product_id}`, 404);
+        }
+
+        const batch = await Batch.findOne({
+          product_id: item.product_id,
+          batch_number: item.batch,
+        }).session(session);
+
+        if (!batch) {
+          await session.abortTransaction();
+          return sendError(
+            res,
+            `Batch ${item.batch} not found for product ${item.product_id}`,
+            404
+          );
+        }
+
+        if (Number(item.units || 0) > Number(batch.stock || 0)) {
+          await session.abortTransaction();
+          return sendError(
+            res,
+            `Insufficient stock in batch ${item.batch}. Available: ${batch.stock}`,
+            400
+          );
+        }
+
+        const salePricePerUnit =
+          Number(item.units || 0) > 0
+            ? Number(item.total || 0) / Number(item.units)
+            : 0;
+
+        const profitPerUnit = salePricePerUnit - Number(batch.unit_cost || 0);
+        const totalProfitForItem = profitPerUnit * Number(item.units || 0);
+
+        totalOrderProfit += totalProfitForItem;
+
+        const [newItem] = await OrderItem.create(
+          [
+            {
+              order_id: sale._id,
+              product_id: item.product_id,
+              batch: item.batch,
+              expiry: item.expiry || null,
+              units: item.units,
+              unit_price: item.unit_price,
+              discount: item.discount || 0,
+              total: item.total,
+              profit: totalProfitForItem,
+            },
+          ],
+          { session }
+        );
+
+        newItems.push(newItem);
+
+        batchUpdates.push({
+          updateOne: {
+            filter: {
+              product_id: item.product_id,
+              batch_number: item.batch,
+            },
+            update: {
+              $inc: { stock: -Number(item.units || 0) },
+            },
+          },
+        });
+      }
+
+      if (batchUpdates.length) {
+        await Batch.bulkWrite(batchUpdates, { session });
+      }
+    }
+
+    sale.profit = totalOrderProfit;
+    await sale.save({ session });
+
+    await session.commitTransaction();
+
+    return successResponse(res, "Sale updated successfully", {
+      order: sale,
+      items: newItems,
+      balance_adjustment: {
+        old_invoice_due: oldInvoiceDue,
+        new_invoice_due: newInvoiceDue,
+        difference: dueDiff,
+        customer_total_debit: Number(updatedCustomerAfterBalance?.pay || 0),
+      },
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error("❌ Edit sale error:", error);
+    return sendError(res, error.message || "Failed to edit sale");
+  } finally {
+    session.endSession();
+  }
+};
+
 // Export all like you mentioned
 const saleController = {
   createSale,
@@ -1960,6 +2228,7 @@ const saleController = {
   deleteSale,
   getLastSaleTransactionByProduct,
   completeSale,
+  editSale,
 };
 
 export default saleController;
