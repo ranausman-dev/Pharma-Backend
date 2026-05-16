@@ -241,6 +241,14 @@ export const getAllProducts = async (req, res) => {
           }
           ,
           // Compute last purchase info (price and discount%) without exposing full purchase object
+          lastPurchaseTradePrice: {
+            $let: {
+              vars: {
+                lastItem: { $arrayElemAt: [ { $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0 ] }
+              },
+              in: { $ifNull: ["$$lastItem.unit_price", 0] }
+            }
+          },
           lastPurchasePrice: {
             $let: {
               vars: {
@@ -250,14 +258,13 @@ export const getAllProducts = async (req, res) => {
                 $let: {
                   vars: {
                     units: { $ifNull: ["$$lastItem.units", 0] },
-                    unit_price: { $ifNull: ["$$lastItem.unit_price", 0] },
-                    discount: { $ifNull: ["$$lastItem.discount", 0] }
+                    total: { $ifNull: ["$$lastItem.total", 0] }
                   },
                   in: {
                     $cond: [
                       { $gt: ["$$units", 0] },
-                      { $round: [ { $subtract: [ "$$unit_price", { $divide: [ "$$discount", "$$units" ] } ] }, 2 ] },
-                      "$$unit_price"
+                      { $round: [ { $divide: [ "$$total", "$$units" ] }, 2 ] },
+                      0
                     ]
                   }
                 }
@@ -328,6 +335,7 @@ export const getAllProducts = async (req, res) => {
           ,
           // Expose only last purchase price and computed discount percentage
           lastPurchasePrice: 1,
+          lastPurchaseTradePrice: 1,
           lastPurchaseDiscountPercentage: 1
         }
       },
@@ -548,6 +556,58 @@ export const getProductById = async (req, res) => {
                 mrp: "$$batch.mrp"
               }
             }
+          },
+          // Compute last purchase info
+          lastPurchaseTradePrice: {
+            $let: {
+              vars: {
+                lastItem: { $arrayElemAt: [ { $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0 ] }
+              },
+              in: { $ifNull: ["$$lastItem.unit_price", 0] }
+            }
+          },
+          lastPurchasePrice: {
+            $let: {
+              vars: {
+                lastItem: { $arrayElemAt: [ { $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0 ] }
+              },
+              in: {
+                $let: {
+                  vars: {
+                    units: { $ifNull: ["$$lastItem.units", 0] },
+                    total: { $ifNull: ["$$lastItem.total", 0] }
+                  },
+                  in: {
+                    $cond: [
+                      { $gt: ["$$units", 0] },
+                      { $round: [ { $divide: [ "$$total", "$$units" ] }, 2 ] },
+                      0
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          lastPurchaseDiscountPercentage: {
+            $let: {
+              vars: {
+                lastItem: { $arrayElemAt: [ { $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0 ] }
+              },
+              in: {
+                $let: {
+                  vars: {
+                    totalBeforeDiscount: { $multiply: [ { $ifNull: ["$$lastItem.unit_price", 0] }, { $ifNull: ["$$lastItem.units", 0] } ] }
+                  },
+                  in: {
+                    $cond: [
+                      { $gt: ["$$totalBeforeDiscount", 0] },
+                      { $round: [ { $multiply: [ { $divide: [ { $ifNull: ["$$lastItem.discount", 0] }, "$$totalBeforeDiscount" ] }, 100 ] }, 2 ] },
+                      0
+                    ]
+                  }
+                }
+              }
+            }
           }
         }
       },
@@ -593,6 +653,11 @@ export const getProductById = async (req, res) => {
 
           // Batches
           batches: "$detailed_batches",
+
+          // Last purchase info
+          lastPurchasePrice: 1,
+          lastPurchaseTradePrice: 1,
+          lastPurchaseDiscountPercentage: 1,
 
           // Timestamps
           createdAt: 1,
