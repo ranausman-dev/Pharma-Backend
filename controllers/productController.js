@@ -812,16 +812,38 @@ export const getProductTransactions = async (req, res) => {
         }
       },
 
-      // Lookup Supplier/Customer
+      // Lookup Batch to get historical prices if needed
       {
         $lookup: {
-          from: "suppliers",
-          localField: "order.supplier_id",
-          foreignField: "_id",
-          as: "party"
+          from: "batches",
+          let: { prod_id: "$product_id", batch_num: "$batch" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ["$product_id", "$$prod_id"] },
+                    { $eq: ["$batch_number", "$$batch_num"] }
+                  ]
+                }
+              }
+            }
+          ],
+          as: "batch_info"
         }
       },
-      { $unwind: { path: "$party", preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: "$batch_info", preserveNullAndEmptyArrays: true } },
+
+      // Lookup Product to get master retail price as secondary fallback
+      {
+        $lookup: {
+          from: "products",
+          localField: "product_id",
+          foreignField: "_id",
+          as: "master_product"
+        }
+      },
+      { $unwind: { path: "$master_product", preserveNullAndEmptyArrays: true } },
 
       // Project fields
       {
@@ -845,7 +867,17 @@ export const getProductTransactions = async (req, res) => {
           net_value: "$order.net_value",
           note: "$order.note",
           due_date: "$order.due_date",
-          item_created_at: "$createdAt"
+          item_created_at: "$createdAt",
+          // Calculate historical prices based on type
+          retail_price: {
+            $ifNull: ["$batch_info.retail_price", { $ifNull: ["$master_product.retail_price", "$unit_price"] }]
+          },
+          trade_price: {
+            $ifNull: ["$batch_info.trade_price", { $ifNull: ["$master_product.trade_price", "$unit_price"] }]
+          },
+          sales_tax: {
+            $ifNull: ["$batch_info.sales_tax", { $ifNull: ["$master_product.sales_tax", 0] }]
+          }
         }
       },
 
@@ -902,6 +934,9 @@ export const getProductTransactions = async (req, res) => {
         expiry: transaction.expiry,
         stock_in: stockIn,
         stock_out: stockOut,
+        retail_price: transaction.retail_price,
+        trade_price: transaction.trade_price,
+        sales_tax: transaction.sales_tax,
         unit_price: transaction.unit_price,
         discount: transaction.discount || 0,
         discount_percentage: discountPercentage, // ← Added

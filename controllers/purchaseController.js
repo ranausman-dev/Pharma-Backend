@@ -228,7 +228,8 @@ const createPurchase = async (req, res) => {
                 unit_cost: mergedUnitCost,
                 discount_percentage: Number(finalDiscountPercentage.toFixed(2)),
                 discount_per_unit: Number(finalDiscountPerUnit.toFixed(2)),
-                expiry_date: expiryValue || existingBatch.expiry_date
+                expiry_date: expiryValue || existingBatch.expiry_date,
+                retail_price: product.retail_price // Ensure retail price is captured
               },
               $inc: { stock: item.units }
             }
@@ -248,6 +249,7 @@ const createPurchase = async (req, res) => {
                 batch_number: item.batch,
                 purchase_price: item.unit_price,
                 expiry_date: expiryValue,
+                retail_price: product.retail_price // Set initial retail price
               },
               $set: {
                 unit_cost: item.units > 0 ? item.total / item.units : 0,
