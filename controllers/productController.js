@@ -81,7 +81,7 @@ export const createProduct = async (req, res) => {
 export const getAllProducts = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit =   20;
+    const limit = 20;
     const skip = (page - 1) * limit;
 
     const products = await Product.aggregate([
@@ -244,7 +244,7 @@ export const getAllProducts = async (req, res) => {
           lastPurchaseTradePrice: {
             $let: {
               vars: {
-                lastItem: { $arrayElemAt: [ { $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0 ] }
+                lastItem: { $arrayElemAt: [{ $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0] }
               },
               in: { $ifNull: ["$$lastItem.unit_price", 0] }
             }
@@ -252,7 +252,7 @@ export const getAllProducts = async (req, res) => {
           lastPurchasePrice: {
             $let: {
               vars: {
-                lastItem: { $arrayElemAt: [ { $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0 ] }
+                lastItem: { $arrayElemAt: [{ $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0] }
               },
               in: {
                 $let: {
@@ -263,7 +263,7 @@ export const getAllProducts = async (req, res) => {
                   in: {
                     $cond: [
                       { $gt: ["$$units", 0] },
-                      { $round: [ { $divide: [ "$$total", "$$units" ] }, 2 ] },
+                      { $round: [{ $divide: ["$$total", "$$units"] }, 2] },
                       0
                     ]
                   }
@@ -274,17 +274,17 @@ export const getAllProducts = async (req, res) => {
           lastPurchaseDiscountPercentage: {
             $let: {
               vars: {
-                lastItem: { $arrayElemAt: [ { $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0 ] }
+                lastItem: { $arrayElemAt: [{ $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0] }
               },
               in: {
                 $let: {
                   vars: {
-                    totalBeforeDiscount: { $multiply: [ { $ifNull: ["$$lastItem.unit_price", 0] }, { $ifNull: ["$$lastItem.units", 0] } ] }
+                    totalBeforeDiscount: { $multiply: [{ $ifNull: ["$$lastItem.unit_price", 0] }, { $ifNull: ["$$lastItem.units", 0] }] }
                   },
                   in: {
                     $cond: [
                       { $gt: ["$$totalBeforeDiscount", 0] },
-                      { $round: [ { $multiply: [ { $divide: [ { $ifNull: ["$$lastItem.discount", 0] }, "$$totalBeforeDiscount" ] }, 100 ] }, 2 ] },
+                      { $round: [{ $multiply: [{ $divide: [{ $ifNull: ["$$lastItem.discount", 0] }, "$$totalBeforeDiscount"] }, 100] }, 2] },
                       0
                     ]
                   }
@@ -561,7 +561,7 @@ export const getProductById = async (req, res) => {
           lastPurchaseTradePrice: {
             $let: {
               vars: {
-                lastItem: { $arrayElemAt: [ { $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0 ] }
+                lastItem: { $arrayElemAt: [{ $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0] }
               },
               in: { $ifNull: ["$$lastItem.unit_price", 0] }
             }
@@ -569,7 +569,7 @@ export const getProductById = async (req, res) => {
           lastPurchasePrice: {
             $let: {
               vars: {
-                lastItem: { $arrayElemAt: [ { $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0 ] }
+                lastItem: { $arrayElemAt: [{ $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0] }
               },
               in: {
                 $let: {
@@ -580,7 +580,7 @@ export const getProductById = async (req, res) => {
                   in: {
                     $cond: [
                       { $gt: ["$$units", 0] },
-                      { $round: [ { $divide: [ "$$total", "$$units" ] }, 2 ] },
+                      { $round: [{ $divide: ["$$total", "$$units"] }, 2] },
                       0
                     ]
                   }
@@ -591,17 +591,17 @@ export const getProductById = async (req, res) => {
           lastPurchaseDiscountPercentage: {
             $let: {
               vars: {
-                lastItem: { $arrayElemAt: [ { $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0 ] }
+                lastItem: { $arrayElemAt: [{ $sortArray: { input: "$purchaseItems", sortBy: { "order.createdAt": -1 } } }, 0] }
               },
               in: {
                 $let: {
                   vars: {
-                    totalBeforeDiscount: { $multiply: [ { $ifNull: ["$$lastItem.unit_price", 0] }, { $ifNull: ["$$lastItem.units", 0] } ] }
+                    totalBeforeDiscount: { $multiply: [{ $ifNull: ["$$lastItem.unit_price", 0] }, { $ifNull: ["$$lastItem.units", 0] }] }
                   },
                   in: {
                     $cond: [
                       { $gt: ["$$totalBeforeDiscount", 0] },
-                      { $round: [ { $multiply: [ { $divide: [ { $ifNull: ["$$lastItem.discount", 0] }, "$$totalBeforeDiscount" ] }, 100 ] }, 2 ] },
+                      { $round: [{ $multiply: [{ $divide: [{ $ifNull: ["$$lastItem.discount", 0] }, "$$totalBeforeDiscount"] }, 100] }, 2] },
                       0
                     ]
                   }
@@ -802,6 +802,39 @@ export const getProductTransactions = async (req, res) => {
         }
       },
       { $unwind: "$order" },
+
+      // Lookup Party (Supplier/Customer) details
+      {
+        $lookup: {
+          from: "suppliers",
+          let: { supplierId: "$order.supplier_id" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $or: [
+                    { $eq: ["$_id", "$$supplierId"] },
+                    {
+                      $eq: [
+                        "$_id",
+                        {
+                          $cond: [
+                            { $eq: [{ $type: "$$supplierId" }, "string"] },
+                            { $toObjectId: "$$supplierId" },
+                            "$$supplierId"
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          ],
+          as: "party"
+        }
+      },
+      { $unwind: { path: "$party", preserveNullAndEmptyArrays: true } },
 
       // Filter relevant order types
       {
