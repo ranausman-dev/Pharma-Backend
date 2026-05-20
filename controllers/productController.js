@@ -803,6 +803,9 @@ export const getProductTransactions = async (req, res) => {
       },
       { $unwind: "$order" },
 
+      // Exclude orders that were marked as skipped (do not show skipped invoices)
+      { $match: { "order.status": { $ne: "skipped" } } },
+
       // Lookup Party (Supplier/Customer) details
       {
         $lookup: {
