@@ -486,7 +486,7 @@ const getAllSales = async (req, res) => {
     const orderItems = await OrderItem.find({ order_id: { $in: saleIds } })
       .populate({
         path: "product_id",
-        select: "name sales_tax sales_tax_percentage pack_size_id product_type",
+        select: "name sales_tax sales_tax_percentage pack_size_id product_type retail_price trade_price",
         populate: [
           {
             path: "pack_size_id",
@@ -924,7 +924,22 @@ export const getAllSaleReturns = async (req, res) => {
     // Populate items for each return order
     const returnIds = returns.map((ret) => ret._id);
     const returnItems = await OrderItem.find({ order_id: { $in: returnIds } })
-      .populate("product_id", "_id name")
+      .populate({
+        path: "product_id",
+        select: "name sales_tax sales_tax_percentage pack_size_id product_type retail_price trade_price",
+        populate: [
+          {
+            path: "pack_size_id",
+            model: "PackSize",
+            select: "name",
+          },
+          {
+            path: "product_type",
+            model: "ProductType",
+            select: "name",
+          },
+        ],
+      })
       .lean();
 
     const returnsWithItems = returns.map((ret) => {
@@ -1195,7 +1210,22 @@ const getSaleById = async (req, res) => {
 
     // Fetch order items with product info
     const items = await OrderItemModel.find({ order_id: orderId })
-      .populate("product_id", "name item_code retail_price trade_price")
+      .populate({
+        path: "product_id",
+        select: "name sales_tax sales_tax_percentage pack_size_id product_type retail_price trade_price",
+        populate: [
+          {
+            path: "pack_size_id",
+            model: "PackSize",
+            select: "name",
+          },
+          {
+            path: "product_type",
+            model: "ProductType",
+            select: "name",
+          },
+        ],
+      })
       .lean();
 
     saleOrder.items = items;
@@ -1236,7 +1266,22 @@ const getBookerSales = async (req, res) => {
     // Get order items
     const orderIds = sales.map((s) => s._id);
     const orderItems = await OrderItem.find({ order_id: { $in: orderIds } })
-      .populate("product_id", "name sku")
+      .populate({
+        path: "product_id",
+        select: "name sales_tax sales_tax_percentage pack_size_id product_type retail_price trade_price",
+        populate: [
+          {
+            path: "pack_size_id",
+            model: "PackSize",
+            select: "name",
+          },
+          {
+            path: "product_type",
+            model: "ProductType",
+            select: "name",
+          },
+        ],
+      })
       .lean();
 
     // Attach items
@@ -1488,7 +1533,22 @@ const getAllBookersSales = async (req, res) => {
     // Get order items
     const orderIds = validSales.map((s) => s._id);
     const orderItems = await OrderItem.find({ order_id: { $in: orderIds } })
-      .populate("product_id", "name sku")
+      .populate({
+        path: "product_id",
+        select: "name sales_tax sales_tax_percentage pack_size_id product_type retail_price trade_price",
+        populate: [
+          {
+            path: "pack_size_id",
+            model: "PackSize",
+            select: "name",
+          },
+          {
+            path: "product_type",
+            model: "ProductType",
+            select: "name",
+          },
+        ],
+      })
       .lean();
 
     // Attach items to their corresponding sales
@@ -2049,62 +2109,92 @@ const editSale = async (req, res) => {
     const newInvoiceDue = Math.max(0, newTotal - newPaidAmount);
 
     const dueDiff = newInvoiceDue - oldInvoiceDue;
+    const oldStatus = sale.status;
+    const newStatus = req.body.status || sale.status;
 
-    // ✅ Reverse old stock
-    const oldItems = await OrderItem.find({ order_id: orderId }).session(session);
+    // 1. Reverse old stock and old customer balance (Only if oldStatus was completed)
+    if (oldStatus === "completed") {
+      const oldItems = await OrderItem.find({ order_id: orderId }).session(session);
+      for (const item of oldItems) {
+        await Batch.findOneAndUpdate(
+          {
+            product_id: item.product_id,
+            batch_number: item.batch,
+          },
+          {
+            $inc: { stock: Number(item.units || 0) },
+          },
+          { session }
+        );
+      }
 
-    for (const item of oldItems) {
-      await Batch.findOneAndUpdate(
-        {
-          product_id: item.product_id,
-          batch_number: item.batch,
-        },
-        {
-          $inc: { stock: Number(item.units || 0) },
-        },
-        { session }
-      );
-    }
-
-    await OrderItem.deleteMany({ order_id: orderId }).session(session);
-
-    // ✅ Customer debit/credit adjustment
-    if (oldCustomerId !== newCustomerId) {
       if (oldCustomerId) {
         await reverseSaleDue(oldCustomerId, oldInvoiceDue);
       }
+    }
 
+    // Delete old items always
+    await OrderItem.deleteMany({ order_id: orderId }).session(session);
+
+    // 2. Customer debit/credit adjustment (Only if newStatus is completed)
+    if (newStatus === "completed") {
       await applySaleDue(newCustomerId, newInvoiceDue);
-    } else {
-      if (dueDiff > 0) {
-        await applySaleDue(oldCustomerId, dueDiff);
-      } else if (dueDiff < 0) {
-        await reverseSaleDue(oldCustomerId, Math.abs(dueDiff));
-      }
     }
 
     const updatedCustomerAfterBalance = await Supplier.findById(newCustomerId).session(session);
 
-    // ✅ Update sale header
-    sale.invoice_number = req.body.invoice_number ?? sale.invoice_number;
+    // 3. Update sale header
+    if (oldStatus === "skipped" && newStatus === "completed") {
+      let isDraftInvoice = !sale.invoice_number || !sale.invoice_number.startsWith("SALE-");
+      if (req.body.invoice_number && req.body.invoice_number.startsWith("SALE-")) {
+        isDraftInvoice = false;
+      }
+      
+      if (isDraftInvoice) {
+        const completedInvoices = await Order.find({
+          status: "completed",
+          type: "sale",
+          invoice_number: { $regex: /^SALE-\d+$/ },
+        })
+          .select("invoice_number")
+          .session(session);
+
+        let maxInvoice = 0;
+        for (const doc of completedInvoices) {
+          const num = parseInt(doc.invoice_number.replace("SALE-", ""), 10);
+          if (!isNaN(num) && num > maxInvoice) {
+            maxInvoice = num;
+          }
+        }
+        const nextNumber = maxInvoice + 1;
+        sale.invoice_number = `SALE-${nextNumber}`;
+      } else {
+        sale.invoice_number = req.body.invoice_number || sale.invoice_number;
+      }
+    } else {
+      sale.invoice_number = req.body.invoice_number ?? sale.invoice_number;
+    }
+
     sale.supplier_id = newCustomerId;
     sale.booker_id = req.body.booker_id ?? sale.booker_id;
     sale.subtotal = req.body.subtotal ?? sale.subtotal;
     sale.total = newTotal;
     sale.paid_amount = newPaidAmount;
 
-    // ✅ Your business rule:
-    // Sale table due amount = customer total debit after this sale
-    sale.due_amount = Number(updatedCustomerAfterBalance?.pay || 0);
+    if (newStatus === "completed") {
+      sale.due_amount = Number(updatedCustomerAfterBalance?.pay || 0);
+    } else {
+      sale.due_amount = req.body.due_amount ?? newInvoiceDue;
+    }
 
     sale.net_value = req.body.net_value ?? sale.net_value;
     sale.due_date = req.body.due_date ?? sale.due_date;
     sale.note = req.body.note ?? sale.note;
-    sale.status = req.body.status ?? sale.status;
+    sale.status = newStatus;
 
     await sale.save({ session });
 
-    // ✅ Recreate items, deduct stock, compute profit
+    // 4. Recreate items, deduct stock (only if newStatus is completed), compute profit
     const newItems = [];
     const batchUpdates = [];
     let totalOrderProfit = 0;
@@ -2132,24 +2222,39 @@ const editSale = async (req, res) => {
           );
         }
 
-        if (Number(item.units || 0) > Number(batch.stock || 0)) {
-          await session.abortTransaction();
-          return sendError(
-            res,
-            `Insufficient stock in batch ${item.batch}. Available: ${batch.stock}`,
-            400
-          );
+        let totalProfitForItem = 0;
+
+        if (newStatus === "completed") {
+          if (Number(item.units || 0) > Number(batch.stock || 0)) {
+            await session.abortTransaction();
+            return sendError(
+              res,
+              `Insufficient stock in batch ${item.batch}. Available: ${batch.stock}`,
+              400
+            );
+          }
+
+          const salePricePerUnit =
+            Number(item.units || 0) > 0
+              ? Number(item.total || 0) / Number(item.units)
+              : 0;
+
+          const profitPerUnit = salePricePerUnit - Number(batch.unit_cost || 0);
+          totalProfitForItem = profitPerUnit * Number(item.units || 0);
+          totalOrderProfit += totalProfitForItem;
+
+          batchUpdates.push({
+            updateOne: {
+              filter: {
+                product_id: item.product_id,
+                batch_number: item.batch,
+              },
+              update: {
+                $inc: { stock: -Number(item.units || 0) },
+              },
+            },
+          });
         }
-
-        const salePricePerUnit =
-          Number(item.units || 0) > 0
-            ? Number(item.total || 0) / Number(item.units)
-            : 0;
-
-        const profitPerUnit = salePricePerUnit - Number(batch.unit_cost || 0);
-        const totalProfitForItem = profitPerUnit * Number(item.units || 0);
-
-        totalOrderProfit += totalProfitForItem;
 
         const [newItem] = await OrderItem.create(
           [
@@ -2169,18 +2274,6 @@ const editSale = async (req, res) => {
         );
 
         newItems.push(newItem);
-
-        batchUpdates.push({
-          updateOne: {
-            filter: {
-              product_id: item.product_id,
-              batch_number: item.batch,
-            },
-            update: {
-              $inc: { stock: -Number(item.units || 0) },
-            },
-          },
-        });
       }
 
       if (batchUpdates.length) {
@@ -2190,6 +2283,99 @@ const editSale = async (req, res) => {
 
     sale.profit = totalOrderProfit;
     await sale.save({ session });
+
+    // 5. Investor Profit Sharing (Only if transition is skipped -> completed)
+    let distributable = 0;
+    if (oldStatus === "skipped" && newStatus === "completed") {
+      const grossSale = sale.total;
+      const expense = grossSale * 0.02;
+      const profit = totalOrderProfit;
+      const charity = profit * 0.1;
+      distributable = profit - charity - expense;
+
+      const investors = await Investor.find({ status: "active" }).session(session);
+      const today = new Date();
+      const monthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+
+      let companyRecord = null;
+
+      for (const inv of investors) {
+        if (inv.name === "Company") {
+          companyRecord = inv;
+          continue;
+        }
+        const joinDate = new Date(inv.join_date);
+        let eligible = false;
+
+        if (joinDate <= new Date(today.getFullYear(), today.getMonth(), 1)) {
+          eligible = true;
+        } else if (
+          joinDate.getDate() <= 15 &&
+          joinDate.getMonth() === today.getMonth() &&
+          joinDate.getFullYear() === today.getFullYear()
+        ) {
+          eligible = today.getDate() >= 15;
+        }
+
+        if (!eligible) continue;
+
+        const invShare = (distributable * (inv.profit_percentage || 0)) / 100;
+        const companyShare = (distributable * (inv.shares || 0)) / 100 - invShare;
+
+        await investorProfit.create(
+          [
+            {
+              investor_id: inv._id,
+              month: monthKey,
+              order_id: sale._id,
+              sales: grossSale,
+              gross_profit: profit,
+              expense,
+              charity,
+              net_profit: distributable,
+              investor_share: invShare,
+              owner_share: companyShare,
+              total: grossSale,
+            },
+          ],
+          { session }
+        );
+
+        inv.credit = (inv.credit || 0) + invShare;
+        await inv.save({ session });
+
+        if (companyRecord) {
+          companyRecord.credit = (companyRecord.credit || 0) + companyShare;
+        }
+      }
+
+      if (companyRecord) {
+        const companyOwnShare = (distributable * companyRecord.shares) / 100;
+        const totalCompanyShare = companyOwnShare + (companyRecord.credit || 0);
+
+        await investorProfit.create(
+          [
+            {
+              investor_id: companyRecord._id,
+              month: monthKey,
+              order_id: sale._id,
+              sales: grossSale,
+              gross_profit: profit,
+              expense,
+              charity,
+              net_profit: distributable,
+              investor_share: 0,
+              owner_share: companyOwnShare,
+              total: grossSale,
+            },
+          ],
+          { session }
+        );
+
+        companyRecord.credit = totalCompanyShare;
+        await companyRecord.save({ session });
+      }
+    }
 
     await session.commitTransaction();
 

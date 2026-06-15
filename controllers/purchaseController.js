@@ -1127,26 +1127,25 @@ const editPurchase = async (req, res) => {
       supplierChanged: oldSupplierId !== newSupplierId,
     });
 
-    // ✅ Reverse old stock
-    const oldItems = await OrderItem.find({ order_id: orderId }).session(session);
+    const oldStatus = order.status;
+    const newStatus = req.body.status || order.status;
 
-    for (const item of oldItems) {
-      await Batch.findOneAndUpdate(
-        {
-          product_id: item.product_id,
-          batch_number: item.batch,
-        },
-        {
-          $inc: { stock: -Number(item.units || 0) },
-        },
-        { session }
-      );
-    }
+    // 1. Reverse old stock and old supplier balance (Only if oldStatus was completed)
+    if (oldStatus === "completed") {
+      const oldItems = await OrderItem.find({ order_id: orderId }).session(session);
+      for (const item of oldItems) {
+        await Batch.findOneAndUpdate(
+          {
+            product_id: item.product_id,
+            batch_number: item.batch,
+          },
+          {
+            $inc: { stock: -Number(item.units || 0) }, // deduct stock (reverses purchase)
+          },
+          { session }
+        );
+      }
 
-    await OrderItem.deleteMany({ order_id: orderId }).session(session);
-
-    // ✅ Supplier balance adjustment
-    if (oldSupplierId !== newSupplierId) {
       if (oldSupplierId) {
         await SupplierModel.findByIdAndUpdate(
           oldSupplierId,
@@ -1154,22 +1153,50 @@ const editPurchase = async (req, res) => {
           { session }
         );
       }
+    }
 
+    await OrderItem.deleteMany({ order_id: orderId }).session(session);
+
+    // 2. Supplier balance adjustment (Only if newStatus is completed)
+    if (newStatus === "completed") {
       await SupplierModel.findByIdAndUpdate(
         newSupplierId,
         { $inc: { receive: newDue } },
         { session }
       );
-    } else {
-      await SupplierModel.findByIdAndUpdate(
-        oldSupplierId,
-        { $inc: { receive: dueDiff } },
-        { session }
-      );
     }
 
-    // ✅ Update order
-    order.invoice_number = req.body.invoice_number ?? order.invoice_number;
+    // 3. Update order status and invoice number
+    if (oldStatus === "skipped" && newStatus === "completed") {
+      let isDraftInvoice = !order.invoice_number || !order.invoice_number.startsWith("PUR-");
+      if (req.body.invoice_number && req.body.invoice_number.startsWith("PUR-")) {
+        isDraftInvoice = false;
+      }
+
+      if (isDraftInvoice) {
+        const completedInvoices = await Order.find({
+          status: "completed",
+          invoice_number: { $regex: /^PUR-\d+$/ },
+        })
+          .select("invoice_number")
+          .session(session);
+
+        let maxInvoice = 0;
+        for (const doc of completedInvoices) {
+          const num = parseInt(doc.invoice_number.replace("PUR-", ""), 10);
+          if (!isNaN(num) && num > maxInvoice) {
+            maxInvoice = num;
+          }
+        }
+        const nextNumber = maxInvoice + 1;
+        order.invoice_number = `PUR-${nextNumber}`;
+      } else {
+        order.invoice_number = req.body.invoice_number || order.invoice_number;
+      }
+    } else {
+      order.invoice_number = req.body.invoice_number ?? order.invoice_number;
+    }
+
     order.purchase_number = req.body.purchase_number ?? order.purchase_number;
     order.supplier_id = newSupplierId;
     order.subtotal = req.body.subtotal ?? order.subtotal;
@@ -1179,11 +1206,11 @@ const editPurchase = async (req, res) => {
     order.net_value = req.body.net_value ?? order.net_value;
     order.due_date = req.body.due_date ?? order.due_date;
     order.note = req.body.note ?? order.note;
-    order.status = req.body.status ?? order.status;
+    order.status = newStatus;
 
     await order.save({ session });
 
-    // ✅ Recreate new items and add stock
+    // 4. Recreate new items and add stock (only if newStatus is completed)
     const newItems = [];
 
     if (Array.isArray(req.body.items)) {
@@ -1208,78 +1235,80 @@ const editPurchase = async (req, res) => {
 
         newItems.push(newItem);
 
-        const existingBatch = await Batch.findOne({
-          product_id: item.product_id,
-          batch_number: item.batch,
-        }).session(session);
+        if (newStatus === "completed") {
+          const existingBatch = await Batch.findOne({
+            product_id: item.product_id,
+            batch_number: item.batch,
+          }).session(session);
 
-        const expiryValue = item.expiry || null;
+          const expiryValue = item.expiry || null;
 
-        const newDiscountPerUnit =
-          Number(item.units || 0) > 0
-            ? Number(item.discount || 0) / Number(item.units)
-            : 0;
+          const newDiscountPerUnit =
+            Number(item.units || 0) > 0
+              ? Number(item.discount || 0) / Number(item.units)
+              : 0;
 
-        const newDiscountPercentage =
-          Number(item.unit_price || 0) > 0
-            ? (newDiscountPerUnit / Number(item.unit_price)) * 100
-            : 0;
+          const newDiscountPercentage =
+            Number(item.unit_price || 0) > 0
+              ? (newDiscountPerUnit / Number(item.unit_price)) * 100
+              : 0;
 
-        if (existingBatch) {
-          const oldStock = Number(existingBatch.stock || 0);
-          const newStock = Number(item.units || 0);
-          const totalStock = oldStock + newStock;
+          if (existingBatch) {
+            const oldStock = Number(existingBatch.stock || 0);
+            const newStock = Number(item.units || 0);
+            const totalStock = oldStock + newStock;
 
-          const oldCostTotal = Number(existingBatch.unit_cost || 0) * oldStock;
-          const newCostTotal = Number(item.total || 0);
+            const oldCostTotal = Number(existingBatch.unit_cost || 0) * oldStock;
+            const newCostTotal = Number(item.total || 0);
 
-          const mergedUnitCost =
-            totalStock > 0 ? (oldCostTotal + newCostTotal) / totalStock : 0;
+            const mergedUnitCost =
+              totalStock > 0 ? (oldCostTotal + newCostTotal) / totalStock : 0;
 
-          batchUpdates.push({
-            updateOne: {
-              filter: {
-                product_id: item.product_id,
-                batch_number: item.batch,
-              },
-              update: {
-                $set: {
-                  unit_cost: Number(mergedUnitCost.toFixed(2)),
-                  discount_per_unit: Number(newDiscountPerUnit.toFixed(2)),
-                  discount_percentage: Number(newDiscountPercentage.toFixed(2)),
-                  expiry_date: expiryValue || existingBatch.expiry_date,
-                },
-                $inc: { stock: Number(item.units || 0) },
-              },
-            },
-          });
-        } else {
-          batchUpdates.push({
-            updateOne: {
-              filter: {
-                product_id: item.product_id,
-                batch_number: item.batch,
-              },
-              update: {
-                $setOnInsert: {
+            batchUpdates.push({
+              updateOne: {
+                filter: {
                   product_id: item.product_id,
                   batch_number: item.batch,
-                  purchase_price: item.unit_price,
                 },
-                $set: {
-                  unit_cost:
-                    Number(item.units || 0) > 0
-                      ? Number(item.total || 0) / Number(item.units)
-                      : 0,
-                  discount_per_unit: Number(newDiscountPerUnit.toFixed(2)),
-                  discount_percentage: Number(newDiscountPercentage.toFixed(2)),
-                  expiry_date: expiryValue,
+                update: {
+                  $set: {
+                    unit_cost: Number(mergedUnitCost.toFixed(2)),
+                    discount_per_unit: Number(newDiscountPerUnit.toFixed(2)),
+                    discount_percentage: Number(newDiscountPercentage.toFixed(2)),
+                    expiry_date: expiryValue || existingBatch.expiry_date,
+                  },
+                  $inc: { stock: Number(item.units || 0) },
                 },
-                $inc: { stock: Number(item.units || 0) },
               },
-              upsert: true,
-            },
-          });
+            });
+          } else {
+            batchUpdates.push({
+              updateOne: {
+                filter: {
+                  product_id: item.product_id,
+                  batch_number: item.batch,
+                },
+                update: {
+                  $setOnInsert: {
+                    product_id: item.product_id,
+                    batch_number: item.batch,
+                    purchase_price: item.unit_price,
+                  },
+                  $set: {
+                    unit_cost:
+                      Number(item.units || 0) > 0
+                        ? Number(item.total || 0) / Number(item.units)
+                        : 0,
+                    discount_per_unit: Number(newDiscountPerUnit.toFixed(2)),
+                    discount_percentage: Number(newDiscountPercentage.toFixed(2)),
+                    expiry_date: expiryValue,
+                  },
+                  $inc: { stock: Number(item.units || 0) },
+                },
+                upsert: true,
+              },
+            });
+          }
         }
       }
 

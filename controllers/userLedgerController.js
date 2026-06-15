@@ -99,7 +99,7 @@ const getUserLedgers = async (req, res) => {
 const editUserLedger = async (req, res) => {
   try {
     const { id } = req.params; // Ledger entry ID
-    const { description, debit, credit, incentive_amount, order_id } = req.body;
+    const { description, debit, credit, incentive_amount, order_id, date } = req.body;
 
     // Find ledger entry
     const ledgerEntry = await UserLedger.findById(id);
@@ -119,6 +119,7 @@ const editUserLedger = async (req, res) => {
     ledgerEntry.credit = credit ?? ledgerEntry.credit;
     ledgerEntry.incentive_amount = incentive_amount ?? ledgerEntry.incentive_amount;
     ledgerEntry.order_id = order_id ?? ledgerEntry.order_id;
+    if (date) ledgerEntry.date = new Date(date);
 
     // Recalculate total_balance
     ledgerEntry.total_balance = `${Math.abs(ledgerEntry.credit - ledgerEntry.debit)} ${ledgerEntry.credit >= ledgerEntry.debit ? "CR" : "DB"}`;

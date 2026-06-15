@@ -115,7 +115,7 @@ const getAllFreeSales = async (req, res) => {
         const freeSales = await FreeSale.find()
             .populate({
                 path: "product_id",
-                select: "name sales_tax sales_tax_percentage pack_size_id",
+                select: "name sales_tax sales_tax_percentage retail_price trade_price pack_size_id",
                 populate: {
                     path: "pack_size_id",
                     model: "PackSize",

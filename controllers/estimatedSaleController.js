@@ -15,11 +15,14 @@ const createEstimatedSale = async (req, res) => {
         const {
             invoice_number,
             estimate_customer_name,
+            supplier_id,
             subtotal,
             total,
             paid_amount,
+            due_amount,
             net_value,
             due_date,
+            estimate_date,
             items,
             type = "estimated",
             status = "completed",
@@ -36,11 +39,14 @@ const createEstimatedSale = async (req, res) => {
                 {
                     invoice_number,
                     estimate_customer_name,
+                    supplier_id: supplier_id || null,
                     subtotal,
                     total,
                     paid_amount,
+                    due_amount: due_amount ?? (total - paid_amount),
                     net_value,
                     due_date,
+                    estimate_date,
                     type,
                     status,
                 },
@@ -61,6 +67,7 @@ const createEstimatedSale = async (req, res) => {
                 [
                     {
                         order_id: newOrder[0]._id,
+                        product_id: item.product_id || null,
                         estimate_product_name: item.estimate_product_name,
                         batch: item.batch,
                         expiry: item.expiry,
@@ -106,7 +113,7 @@ const getAllEstimatedSales = async (req, res) => {
 
         // Step 1: Get all sale orders with pagination
         const estimatedSales = await Order.find({ type: "estimated" })
-            .populate("supplier_id", "owner1_name")
+            .populate("supplier_id", "owner1_name company_name address city phone_number")
             .populate("booker_id", "name")
             .sort({ createdAt: -1 })
             .skip(skip)
@@ -117,7 +124,9 @@ const getAllEstimatedSales = async (req, res) => {
         const orderIds = estimatedSales.map((order) => order._id);
 
         // Step 3: Fetch all items for these orders
-        const items = await OrderItem.find({ order_id: { $in: orderIds } }).lean();
+        const items = await OrderItem.find({ order_id: { $in: orderIds } })
+            .populate("product_id")
+            .lean();
 
         // Step 4: Group items by order_id
         const itemsByOrder = items.reduce((acc, item) => {
@@ -162,7 +171,7 @@ const getEstimatedSaleById = async (req, res) => {
         }
 
         const order = await Order.findOne({ _id: orderId, type: "estimated" })
-            .populate("supplier_id", "owner1_name")
+            .populate("supplier_id", "owner1_name company_name address city phone_number")
             .populate("booker_id", "name")
             .lean();
 
@@ -170,7 +179,9 @@ const getEstimatedSaleById = async (req, res) => {
             return sendError(res, "Estimated Sale not found", 404);
         }
 
-        const items = await OrderItem.find({ order_id: orderId }).lean();
+        const items = await OrderItem.find({ order_id: orderId })
+            .populate("product_id")
+            .lean();
 
         return successResponse(res, "Estimated Sale fetched successfully", {
             ...order,
@@ -238,11 +249,14 @@ const updateEstimatedSale = async (req, res) => {
         const {
             invoice_number,
             estimate_customer_name,
+            supplier_id,
             subtotal,
             total,
             paid_amount,
+            due_amount,
             net_value,
             due_date,
+            estimate_date,
             items,
             status,
         } = req.body;
@@ -267,9 +281,12 @@ const updateEstimatedSale = async (req, res) => {
         // Step 2: Update order fields
         existingOrder.invoice_number = invoice_number || existingOrder.invoice_number;
         existingOrder.estimate_customer_name = estimate_customer_name || existingOrder.estimate_customer_name;
+        existingOrder.supplier_id = supplier_id || existingOrder.supplier_id;
+        existingOrder.estimate_date = estimate_date !== undefined ? estimate_date : existingOrder.estimate_date;
         existingOrder.subtotal = subtotal ?? existingOrder.subtotal;
         existingOrder.total = total ?? existingOrder.total;
         existingOrder.paid_amount = paid_amount ?? existingOrder.paid_amount;
+        existingOrder.due_amount = due_amount ?? (existingOrder.total - existingOrder.paid_amount);
         existingOrder.net_value = net_value ?? existingOrder.net_value;
         existingOrder.due_date = due_date || existingOrder.due_date;
         existingOrder.status = status || existingOrder.status;
@@ -286,6 +303,7 @@ const updateEstimatedSale = async (req, res) => {
                     [
                         {
                             order_id: orderId,
+                            product_id: item.product_id || null,
                             estimate_product_name: item.estimate_product_name,
                             batch: item.batch,
                             expiry: item.expiry,

@@ -19,6 +19,7 @@ const orderSchema = new mongoose.Schema(
     paid_amount: { type: Number, required: true },
     due_amount: { type: Number, default: 0 },
     due_date: { type: Date, default: null },
+    estimate_date: { type: String, default: "" },
     estimate_customer_name: { type: String, default: "" },
     net_value: { type: Number, required: true },
     recovered_amount: { type: Number, default: 0 },
