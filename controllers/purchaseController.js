@@ -1104,12 +1104,20 @@ const editPurchase = async (req, res) => {
       isSameAmount(oldTotal, newTotal) &&
       isSameAmount(oldPaidAmount, newPaidAmount);
 
-    // ✅ IMPORTANT FIX:
-    // If user saved edit page without changing total or paid amount,
-    // keep old due amount. Do not trust frontend recalculated due.
-    const newDue = isFinancialSame
-      ? oldDue
-      : Number(req.body.due_amount ?? (newTotal - newPaidAmount)) || 0;
+    const oldStatus = order.status;
+    const newStatus = req.body.status || order.status;
+
+    // ✅ Calculate due amount based on status transition:
+    // If transitioning from skipped to completed, calculate it relative to current supplier balance.
+    // Otherwise, if financial values are same, preserve oldDue, else use request/recalculated due.
+    let newDue;
+    if (oldStatus === "skipped" && newStatus === "completed") {
+      newDue = (supplierExists.receive || 0) + (newTotal - newPaidAmount) - (supplierExists.pay || 0);
+    } else {
+      newDue = isFinancialSame
+        ? oldDue
+        : Number(req.body.due_amount ?? (newTotal - newPaidAmount)) || 0;
+    }
 
     const dueDiff = newDue - oldDue;
 
@@ -1126,9 +1134,6 @@ const editPurchase = async (req, res) => {
       isFinancialSame,
       supplierChanged: oldSupplierId !== newSupplierId,
     });
-
-    const oldStatus = order.status;
-    const newStatus = req.body.status || order.status;
 
     // 1. Reverse old stock and old supplier balance (Only if oldStatus was completed)
     if (oldStatus === "completed") {
@@ -1149,7 +1154,7 @@ const editPurchase = async (req, res) => {
       if (oldSupplierId) {
         await SupplierModel.findByIdAndUpdate(
           oldSupplierId,
-          { $inc: { receive: -oldDue } },
+          { $inc: { receive: -(oldTotal - oldPaidAmount) } },
           { session }
         );
       }
@@ -1161,11 +1166,12 @@ const editPurchase = async (req, res) => {
     if (newStatus === "completed") {
       await SupplierModel.findByIdAndUpdate(
         newSupplierId,
-        { $inc: { receive: newDue } },
+        { $inc: { receive: (newTotal - newPaidAmount) } },
         { session }
       );
     }
 
+    let disableTimestamps = false;
     // 3. Update order status and invoice number
     if (oldStatus === "skipped" && newStatus === "completed") {
       let isDraftInvoice = !order.invoice_number || !order.invoice_number.startsWith("PUR-");
@@ -1193,6 +1199,11 @@ const editPurchase = async (req, res) => {
       } else {
         order.invoice_number = req.body.invoice_number || order.invoice_number;
       }
+
+      // ✅ Update createdAt when completing a draft!
+      order.createdAt = new Date();
+      order.updatedAt = new Date();
+      disableTimestamps = true;
     } else {
       order.invoice_number = req.body.invoice_number ?? order.invoice_number;
     }
@@ -1208,7 +1219,7 @@ const editPurchase = async (req, res) => {
     order.note = req.body.note ?? order.note;
     order.status = newStatus;
 
-    await order.save({ session });
+    await order.save({ session, ...(disableTimestamps ? { timestamps: false } : {}) });
 
     // 4. Recreate new items and add stock (only if newStatus is completed)
     const newItems = [];
@@ -1682,14 +1693,22 @@ export const completePurchase = async (req, res) => {
     const completedTotal = purchase.total || 0;
     const completedPaid = purchase.paid_amount || 0;
 
+    const supplierNewReceive = (supplierDoc.receive || 0) + (completedTotal - completedPaid);
+    const supplierPay = supplierDoc.pay || 0;
+    const calculatedDueAmount = supplierNewReceive - supplierPay;
+
     await SupplierModel.findByIdAndUpdate(
       purchase.supplier_id,
       {
-        pay: supplierDoc.pay || 0,
-        receive: (supplierDoc.receive || 0) + (completedTotal - completedPaid),
+        pay: supplierPay,
+        receive: supplierNewReceive,
       },
       { session }
     );
+
+    // ✅ Override due_amount with calculated due_amount and update createdAt
+    purchase.due_amount = calculatedDueAmount;
+    purchase.createdAt = new Date();
 
     /* =====================================================
        4️⃣ Items & batch stock updates
@@ -1805,7 +1824,8 @@ export const completePurchase = async (req, res) => {
     /* =====================================================
        5️⃣ Save & commit
        ===================================================== */
-    await purchase.save({ session });
+    purchase.updatedAt = new Date();
+    await purchase.save({ session, timestamps: false });
     await session.commitTransaction();
 
     return res.json({

@@ -125,7 +125,13 @@ const getAllEstimatedSales = async (req, res) => {
 
         // Step 3: Fetch all items for these orders
         const items = await OrderItem.find({ order_id: { $in: orderIds } })
-            .populate("product_id")
+            .populate({
+                path: "product_id",
+                populate: {
+                    path: "pack_size_id",
+                    model: "PackSize",
+                },
+            })
             .lean();
 
         // Step 4: Group items by order_id
@@ -180,7 +186,13 @@ const getEstimatedSaleById = async (req, res) => {
         }
 
         const items = await OrderItem.find({ order_id: orderId })
-            .populate("product_id")
+            .populate({
+                path: "product_id",
+                populate: {
+                    path: "pack_size_id",
+                    model: "PackSize",
+                },
+            })
             .lean();
 
         return successResponse(res, "Estimated Sale fetched successfully", {

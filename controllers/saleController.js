@@ -1762,6 +1762,10 @@ export const completeSale = async (req, res) => {
       { session },
     );
 
+    // ✅ Override due_amount with calculated due_amount and update createdAt
+    sale.due_amount = updatedPay;
+    sale.createdAt = new Date();
+
     /* =====================================================
        4️⃣ Items & batch stock updates with profit calculation
        ===================================================== */
@@ -1864,7 +1868,8 @@ export const completeSale = async (req, res) => {
 
     // Update sale with total profit
     sale.profit = totalOrderProfit;
-    await sale.save({ session });
+    sale.updatedAt = new Date();
+    await sale.save({ session, timestamps: false });
 
     /* =====================================================
        5️⃣ Investor Profit Sharing (same as createSale)
@@ -2144,6 +2149,7 @@ const editSale = async (req, res) => {
     const updatedCustomerAfterBalance = await Supplier.findById(newCustomerId).session(session);
 
     // 3. Update sale header
+    let disableTimestamps = false;
     if (oldStatus === "skipped" && newStatus === "completed") {
       let isDraftInvoice = !sale.invoice_number || !sale.invoice_number.startsWith("SALE-");
       if (req.body.invoice_number && req.body.invoice_number.startsWith("SALE-")) {
@@ -2171,6 +2177,11 @@ const editSale = async (req, res) => {
       } else {
         sale.invoice_number = req.body.invoice_number || sale.invoice_number;
       }
+
+      // ✅ Update createdAt when completing a draft!
+      sale.createdAt = new Date();
+      sale.updatedAt = new Date();
+      disableTimestamps = true;
     } else {
       sale.invoice_number = req.body.invoice_number ?? sale.invoice_number;
     }
@@ -2192,7 +2203,7 @@ const editSale = async (req, res) => {
     sale.note = req.body.note ?? sale.note;
     sale.status = newStatus;
 
-    await sale.save({ session });
+    await sale.save({ session, ...(disableTimestamps ? { timestamps: false } : {}) });
 
     // 4. Recreate items, deduct stock (only if newStatus is completed), compute profit
     const newItems = [];
