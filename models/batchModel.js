@@ -30,6 +30,18 @@ const batchSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  retail_price: {
+    type: Number,
+    default: 0
+  },
+  trade_price: {
+    type: Number,
+    default: 0
+  },
+  sales_tax: {
+    type: Number,
+    default: 0
+  },
 }, { timestamps: true });
 
 export const BatchModel = mongoose.model("Batch", batchSchema);

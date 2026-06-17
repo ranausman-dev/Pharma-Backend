@@ -22,6 +22,10 @@ const freeSaleItemSchema = new mongoose.Schema({
         type: Number,
         default: 0,
     },
+    discount: {
+        type: Number,
+        default: 0,
+    },
 });
 
 const freeSaleSchema = new mongoose.Schema(
@@ -63,6 +67,10 @@ const freeSaleSchema = new mongoose.Schema(
             default: 0,
         },
         sub_total: {
+            type: Number,
+            default: 0,
+        },
+        discount: {
             type: Number,
             default: 0,
         },

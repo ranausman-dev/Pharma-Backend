@@ -328,6 +328,7 @@ export const getAllProducts = async (req, res) => {
                 expiry_date: "$$batch.expiry_date",
                 discount_per_unit: "$$batch.discount_per_unit",
                 unit_cost: "$$batch.unit_cost",
+                purchase_price: "$$batch.purchase_price",
                 stock: "$$batch.stock"
               }
             }
@@ -906,13 +907,13 @@ export const getProductTransactions = async (req, res) => {
           item_created_at: "$createdAt",
           // Calculate historical prices based on type
           retail_price: {
-            $ifNull: ["$batch_info.retail_price", { $ifNull: ["$master_product.retail_price", "$unit_price"] }]
+            $ifNull: ["$retail_price", { $ifNull: ["$batch_info.retail_price", { $ifNull: ["$master_product.retail_price", "$unit_price"] }] }]
           },
           trade_price: {
-            $ifNull: ["$batch_info.trade_price", { $ifNull: ["$master_product.trade_price", "$unit_price"] }]
+            $ifNull: ["$trade_price", { $ifNull: ["$batch_info.trade_price", { $ifNull: ["$master_product.trade_price", "$unit_price"] }] }]
           },
           sales_tax: {
-            $ifNull: ["$batch_info.sales_tax", { $ifNull: ["$master_product.sales_tax", 0] }]
+            $ifNull: ["$sales_tax", { $ifNull: ["$batch_info.sales_tax", { $ifNull: ["$master_product.sales_tax", 0] }] }]
           }
         }
       },

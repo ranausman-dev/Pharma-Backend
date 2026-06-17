@@ -184,9 +184,11 @@ const createSale = async (req, res) => {
             units: item.units,
             unit_price: item.unit_price,
             discount: item.discount || 0,
-            total: item.total,
             profit: 0, // Will be updated for completed orders
             total: calculatedTotal,
+            retail_price: product.retail_price,
+            trade_price: product.trade_price,
+            sales_tax: product.sales_tax,
           },
         ],
         { session },
@@ -854,6 +856,7 @@ const returnSaleByInvoice = async (req, res) => {
       // Calculate proportional profit being returned
       const profitPerUnit = orderItem.units > 0 ? (orderItem.profit || 0) / orderItem.units : 0;
       returnedProfit += profitPerUnit * item.units;
+      const product = await Product.findById(item.product_id).session(session);
 
       // Create return order item
       const returnOrderItem = await OrderItem.create(
@@ -867,6 +870,9 @@ const returnSaleByInvoice = async (req, res) => {
             unit_price: item.unit_price,
             discount: item.discount || 0,
             total: returnTotal,
+            retail_price: product ? product.retail_price : (orderItem.retail_price || 0),
+            trade_price: product ? product.trade_price : (orderItem.trade_price || 0),
+            sales_tax: product ? product.sales_tax : (orderItem.sales_tax || 0),
           },
         ],
         { session },
@@ -1829,6 +1835,9 @@ export const completeSale = async (req, res) => {
         orderItem.total = item.total;
         orderItem.expiry = expiryValue;
         orderItem.profit = totalProfitForItem;
+        orderItem.retail_price = product.retail_price;
+        orderItem.trade_price = product.trade_price;
+        orderItem.sales_tax = product.sales_tax;
         await orderItem.save({ session });
       } else {
         // Create new order item
@@ -1844,6 +1853,9 @@ export const completeSale = async (req, res) => {
               discount: item.discount || 0,
               total: item.total,
               profit: totalProfitForItem,
+              retail_price: product.retail_price,
+              trade_price: product.trade_price,
+              sales_tax: product.sales_tax,
             },
           ],
           { session },
@@ -2279,6 +2291,9 @@ const editSale = async (req, res) => {
               discount: item.discount || 0,
               total: item.total,
               profit: totalProfitForItem,
+              retail_price: product.retail_price,
+              trade_price: product.trade_price,
+              sales_tax: product.sales_tax,
             },
           ],
           { session }

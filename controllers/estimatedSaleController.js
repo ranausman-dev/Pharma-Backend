@@ -62,7 +62,19 @@ const createEstimatedSale = async (req, res) => {
         const orderItems = [];
 
         for (const item of items) {
-            // Direct save, no product check
+            let retailPrice = 0;
+            let tradePrice = 0;
+            let salesTax = 0;
+            if (item.product_id) {
+                const product = await Product.findById(item.product_id).session(session);
+                if (product) {
+                    retailPrice = product.retail_price;
+                    tradePrice = product.trade_price;
+                    salesTax = product.sales_tax;
+                }
+            }
+
+            // Direct save
             const orderItem = await OrderItem.create(
                 [
                     {
@@ -75,6 +87,9 @@ const createEstimatedSale = async (req, res) => {
                         unit_price: item.unit_price,
                         discount: item.discount || 0,
                         total: item.total,
+                        retail_price: retailPrice || item.unit_price,
+                        trade_price: tradePrice || item.unit_price,
+                        sales_tax: salesTax,
                     },
                 ],
                 { session }
@@ -311,6 +326,18 @@ const updateEstimatedSale = async (req, res) => {
 
             const newItems = [];
             for (const item of items) {
+                let retailPrice = 0;
+                let tradePrice = 0;
+                let salesTax = 0;
+                if (item.product_id) {
+                    const product = await Product.findById(item.product_id).session(session);
+                    if (product) {
+                        retailPrice = product.retail_price;
+                        tradePrice = product.trade_price;
+                        salesTax = product.sales_tax;
+                    }
+                }
+
                 const orderItem = await OrderItem.create(
                     [
                         {
@@ -323,6 +350,9 @@ const updateEstimatedSale = async (req, res) => {
                             unit_price: item.unit_price,
                             discount: item.discount || 0,
                             total: item.total,
+                            retail_price: retailPrice || item.unit_price,
+                            trade_price: tradePrice || item.unit_price,
+                            sales_tax: salesTax,
                         },
                     ],
                     { session }

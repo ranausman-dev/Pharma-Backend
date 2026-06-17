@@ -64,7 +64,7 @@ const createFreeSale = async (req, res) => {
         const itemsToSave = [];
 
         for (const item of itemsToProcess) {
-            const { product_id: itemId, batch: itemBatch, expiry: itemExpiry, quantity: itemQty, sub_total: itemSubTotal } = item;
+            const { product_id: itemId, batch: itemBatch, expiry: itemExpiry, quantity: itemQty, sub_total: itemSubTotal, discount: itemDiscount } = item;
 
             // Check if product exists
             const product = await Product.findById(itemId).session(session);
@@ -116,7 +116,8 @@ const createFreeSale = async (req, res) => {
                 batch: itemBatch,
                 expiry: formattedExpiry,
                 quantity: itemQty,
-                sub_total: itemSubTotal
+                sub_total: itemSubTotal,
+                discount: Number(itemDiscount) || 0
             });
         }
 
@@ -133,6 +134,7 @@ const createFreeSale = async (req, res) => {
             expiry: itemsToSave[0]?.expiry,
             quantity: itemsToSave.reduce((sum, i) => sum + i.quantity, 0),
             sub_total: itemsToSave.reduce((sum, i) => sum + i.sub_total, 0),
+            discount: itemsToSave.reduce((sum, i) => sum + (i.discount || 0), 0),
         });
 
         const savedFreeSale = await newFreeSale.save({ session });
@@ -190,7 +192,8 @@ const getAllFreeSales = async (req, res) => {
                     batch: obj.batch,
                     expiry: obj.expiry,
                     quantity: obj.quantity,
-                    sub_total: obj.sub_total
+                    sub_total: obj.sub_total,
+                    discount: obj.discount || 0
                 }];
             }
             return obj;
@@ -261,6 +264,7 @@ const getFreeSaleById = async (req, res) => {
                 expiry: item.expiry,
                 quantity: item.quantity,
                 sub_total: item.sub_total,
+                discount: item.discount || 0,
                 sale_person: item.sale_person
             }));
         }

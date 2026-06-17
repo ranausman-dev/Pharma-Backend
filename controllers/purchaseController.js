@@ -106,6 +106,12 @@ const createPurchase = async (req, res) => {
     // ✅ Always create order items (even in draft)
     const orderItems = [];
     for (const item of items) {
+      const product = await Product.findById(item.product_id).session(session);
+      if (!product) {
+        await session.abortTransaction();
+        return sendError(res, `Product not found: ${item.product_id}`, 404);
+      }
+
       const [orderItem] = await OrderItem.create(
         [
           {
@@ -117,6 +123,9 @@ const createPurchase = async (req, res) => {
             unit_price: item.unit_price,
             discount: item.discount || 0,
             total: item.total,
+            retail_price: product.retail_price,
+            trade_price: product.trade_price,
+            sales_tax: product.sales_tax,
           },
         ],
         { session }
@@ -229,7 +238,9 @@ const createPurchase = async (req, res) => {
                 discount_percentage: Number(finalDiscountPercentage.toFixed(2)),
                 discount_per_unit: Number(finalDiscountPerUnit.toFixed(2)),
                 expiry_date: expiryValue || existingBatch.expiry_date,
-                retail_price: product.retail_price // Ensure retail price is captured
+                retail_price: product.retail_price,
+                trade_price: product.trade_price,
+                sales_tax: product.sales_tax
               },
               $inc: { stock: item.units }
             }
@@ -249,7 +260,9 @@ const createPurchase = async (req, res) => {
                 batch_number: item.batch,
                 purchase_price: item.unit_price,
                 expiry_date: expiryValue,
-                retail_price: product.retail_price // Set initial retail price
+                retail_price: product.retail_price,
+                trade_price: product.trade_price,
+                sales_tax: product.sales_tax
               },
               $set: {
                 unit_cost: item.units > 0 ? item.total / item.units : 0,
@@ -677,10 +690,7 @@ const returnPurchaseByInvoice = async (req, res) => {
     // Process return items and update original order items
     for (const item of items) {
       const { orderItem, returnTotal } = orderItemsMap[item.batch];
-
-      // Deduct units from original order item
-      // orderItem.units -= item.units;
-      // await orderItem.save({ session });
+      const product = await Product.findById(item.product_id).session(session);
 
       // Create return order item
       const returnOrderItem = await OrderItem.create(
@@ -694,6 +704,9 @@ const returnPurchaseByInvoice = async (req, res) => {
             unit_price: orderItem.unit_price,
             discount: item.discount || 0,
             total: returnTotal,
+            retail_price: product ? product.retail_price : (orderItem.retail_price || 0),
+            trade_price: product ? product.trade_price : (orderItem.trade_price || 0),
+            sales_tax: product ? product.sales_tax : (orderItem.sales_tax || 0),
           },
         ],
         { session }
@@ -1228,6 +1241,12 @@ const editPurchase = async (req, res) => {
       const batchUpdates = [];
 
       for (const item of req.body.items) {
+        const product = await Product.findById(item.product_id).session(session);
+        if (!product) {
+          await session.abortTransaction();
+          return sendError(res, `Product not found: ${item.product_id}`, 404);
+        }
+
         const [newItem] = await OrderItem.create(
           [
             {
@@ -1239,6 +1258,9 @@ const editPurchase = async (req, res) => {
               unit_price: item.unit_price,
               discount: item.discount || 0,
               total: item.total,
+              retail_price: product.retail_price,
+              trade_price: product.trade_price,
+              sales_tax: product.sales_tax,
             },
           ],
           { session }
@@ -1287,6 +1309,9 @@ const editPurchase = async (req, res) => {
                     discount_per_unit: Number(newDiscountPerUnit.toFixed(2)),
                     discount_percentage: Number(newDiscountPercentage.toFixed(2)),
                     expiry_date: expiryValue || existingBatch.expiry_date,
+                    retail_price: product.retail_price,
+                    trade_price: product.trade_price,
+                    sales_tax: product.sales_tax
                   },
                   $inc: { stock: Number(item.units || 0) },
                 },
@@ -1304,6 +1329,9 @@ const editPurchase = async (req, res) => {
                     product_id: item.product_id,
                     batch_number: item.batch,
                     purchase_price: item.unit_price,
+                    retail_price: product.retail_price,
+                    trade_price: product.trade_price,
+                    sales_tax: product.sales_tax
                   },
                   $set: {
                     unit_cost:
@@ -1738,6 +1766,9 @@ export const completePurchase = async (req, res) => {
         orderItem.discount = item.discount || 0;
         orderItem.total = item.total;
         orderItem.expiry = expiryValue;
+        orderItem.retail_price = product.retail_price;
+        orderItem.trade_price = product.trade_price;
+        orderItem.sales_tax = product.sales_tax;
         await orderItem.save({ session });
       } else {
         [orderItem] = await OrderItem.create(
@@ -1751,6 +1782,9 @@ export const completePurchase = async (req, res) => {
               unit_price: item.unit_price,
               discount: item.discount || 0,
               total: item.total,
+              retail_price: product.retail_price,
+              trade_price: product.trade_price,
+              sales_tax: product.sales_tax,
             },
           ],
           { session }

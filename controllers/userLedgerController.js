@@ -4,7 +4,7 @@ import { sendError, successResponse } from "../utils/response.js";
 
 const addUserLedger = async (req, res) => {
   try {
-    const { user_id, description, debit, credit, incentive_amount, order_id } = req.body;
+    const { user_id, description, debit, credit, incentive_amount, order_id, date } = req.body;
 
     // Check if user exists
     const user = await User.findById(user_id);
@@ -20,6 +20,7 @@ const addUserLedger = async (req, res) => {
       credit,
       incentive_amount,
       order_id,
+      date: date ? new Date(date) : undefined,
       total_balance: `${Math.abs(credit - debit)} ${credit >= debit ? "CR" : "DB"}`
     });
 

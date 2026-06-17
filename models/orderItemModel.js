@@ -37,6 +37,18 @@ const orderItemSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    retail_price: {
+      type: Number,
+      default: 0,
+    },
+    trade_price: {
+      type: Number,
+      default: 0,
+    },
+    sales_tax: {
+      type: Number,
+      default: 0,
+    },
   },
   {
     timestamps: true,
