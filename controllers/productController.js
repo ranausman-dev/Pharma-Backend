@@ -4,6 +4,7 @@ import { OrderModel as Order } from "../models/orderModel.js";
 import { OrderItemModel as OrderItem } from "../models/orderItemModel.js";
 import { BatchModel as Batch } from "../models/batchModel.js";
 import { SupplierModel as Supplier } from "../models/supplierModel.js";
+import FreeSale from "../models/freeSaleModel.js";
 import mongoose from "mongoose";
 
 
@@ -922,11 +923,79 @@ export const getProductTransactions = async (req, res) => {
       { $sort: { date: 1, item_created_at: 1 } }
     ]);
 
-    console.log(allTransactions);
+    // Fetch Free Sales transactions for this product
+    const freeSales = await FreeSale.find({
+      $or: [
+        { product_id: product_id },
+        { "items.product_id": product_id }
+      ]
+    }).populate("desc_id").lean();
+
+    const freeSaleTransactions = [];
+    for (const fs of freeSales) {
+      let items = [];
+      if (fs.items && fs.items.length > 0) {
+        items = fs.items.filter(item => item.product_id && item.product_id.toString() === product_id.toString());
+      } else {
+        if (fs.product_id && fs.product_id.toString() === product_id.toString()) {
+          items = [{
+            product_id: fs.product_id,
+            batch: fs.batch,
+            expiry: fs.expiry,
+            quantity: fs.quantity,
+            sub_total: fs.sub_total,
+            discount: fs.discount
+          }];
+        }
+      }
+
+      for (const item of items) {
+        freeSaleTransactions.push({
+          order_id: fs._id,
+          invoice_number: fs.invoice_number,
+          purchase_number: null,
+          party_name: fs.sale_person + (fs.desc_id?.desc ? ` (${fs.desc_id.desc})` : ""),
+          units: item.quantity || 0,
+          unit_price: item.quantity > 0 ? ((item.sub_total || 0) / item.quantity) : 0,
+          discount: item.discount || 0,
+          profit: 0,
+          total: item.sub_total || 0,
+          batch: item.batch,
+          expiry: item.expiry,
+          status: "completed",
+          type: "free_sale",
+          date: fs.createdAt || new Date(),
+          paid_amount: 0,
+          due_amount: 0,
+          net_value: item.sub_total || 0,
+          note: fs.desc_id?.desc || "",
+          due_date: null,
+          item_created_at: fs.createdAt || new Date(),
+          retail_price: product.retail_price || 0,
+          trade_price: product.trade_price || 0,
+          sales_tax: product.sales_tax || 0
+        });
+      }
+    }
+
+    // Combine transactions
+    const combinedTransactions = [...allTransactions, ...freeSaleTransactions];
+
+    // Sort by date (oldest first for running balance calculation)
+    combinedTransactions.sort((a, b) => {
+      const dateA = new Date(a.date);
+      const dateB = new Date(b.date);
+      if (dateA - dateB !== 0) {
+        return dateA - dateB;
+      }
+      return new Date(a.item_created_at) - new Date(b.item_created_at);
+    });
+
+    console.log(combinedTransactions);
 
     // 🔹 Calculate running balance (stock ledger)
     let runningBalance = 0;
-    const transactionsWithBalance = allTransactions.map((transaction, index) => {
+    const transactionsWithBalance = combinedTransactions.map((transaction, index) => {
       let stockIn = 0;
       let stockOut = 0;
 
@@ -936,6 +1005,7 @@ export const getProductTransactions = async (req, res) => {
           stockIn = transaction.units;
           runningBalance += transaction.units;
           break;
+        case "free_sale":
         case "sale":
           stockOut = transaction.units;
           runningBalance -= transaction.units;
@@ -976,7 +1046,7 @@ export const getProductTransactions = async (req, res) => {
         sales_tax: transaction.sales_tax,
         unit_price: transaction.unit_price,
         discount: transaction.discount || 0,
-        discount_percentage: discountPercentage, // ← Added
+        discount_percentage: discountPercentage,
         total_value: transaction.total,
         running_balance: runningBalance,
         status: transaction.status,
@@ -990,7 +1060,7 @@ export const getProductTransactions = async (req, res) => {
 
     // 🔹 Calculate summary statistics
     const summary = {
-      total_transactions: allTransactions.length,
+      total_transactions: combinedTransactions.length,
       total_stock_in: transactionsWithBalance.reduce((sum, t) => sum + t.stock_in, 0),
       total_stock_out: transactionsWithBalance.reduce((sum, t) => sum + t.stock_out, 0),
       current_balance: runningBalance,
@@ -998,12 +1068,12 @@ export const getProductTransactions = async (req, res) => {
         .filter(t => t.type === "purchase")
         .reduce((sum, t) => sum + t.total_value, 0),
       total_sale_value: transactionsWithBalance
-        .filter(t => t.type === "sale")
+        .filter(t => t.type === "sale" || t.type === "free_sale")
         .reduce((sum, t) => sum + t.total_value, 0),
       total_profit: transactionsWithBalance.reduce((sum, t) => sum + t.profit, 0),
-      total_discount: transactionsWithBalance.reduce((sum, t) => sum + t.discount, 0), // ← Added
+      total_discount: transactionsWithBalance.reduce((sum, t) => sum + t.discount, 0),
       purchases_count: transactionsWithBalance.filter(t => t.type === "purchase").length,
-      sales_count: transactionsWithBalance.filter(t => t.type === "sale").length,
+      sales_count: transactionsWithBalance.filter(t => t.type === "sale" || t.type === "free_sale").length,
       returns_count: transactionsWithBalance.filter(t =>
         t.type === "purchase_return" || t.type === "sale_return"
       ).length
@@ -1012,7 +1082,7 @@ export const getProductTransactions = async (req, res) => {
     // 🔹 Group transactions by type for quick reference
     const groupedByType = {
       purchases: transactionsWithBalance.filter(t => t.type === "purchase"),
-      sales: transactionsWithBalance.filter(t => t.type === "sale"),
+      sales: transactionsWithBalance.filter(t => t.type === "sale" || t.type === "free_sale"),
       purchase_returns: transactionsWithBalance.filter(t => t.type === "purchase_return"),
       sale_returns: transactionsWithBalance.filter(t => t.type === "sale_return")
     };
