@@ -539,6 +539,50 @@ const getProductPurchases = async (req, res) => {
   }
 };
 
+// Helper functions for tracking purchase returns
+const getReturnedQuantities = async (invoiceNumber, type) => {
+  const returnType = type === "purchase" ? "purchase_return" : "sale_return";
+  const returnOrders = await Order.find({
+    invoice_number: invoiceNumber + "-R",
+    type: returnType
+  }).select("_id");
+
+  if (!returnOrders.length) return {};
+
+  const returnOrderIds = returnOrders.map(ro => ro._id);
+  const returnedItems = await OrderItemModel.find({
+    order_id: { $in: returnOrderIds }
+  });
+
+  const returnedMap = {};
+  for (const item of returnedItems) {
+    const productIdStr = item.product_id._id ? item.product_id._id.toString() : item.product_id.toString();
+    const key = `${productIdStr}_${item.batch}`;
+    returnedMap[key] = (returnedMap[key] || 0) + item.units;
+  }
+  return returnedMap;
+};
+
+const enrichPurchaseWithReturns = async (purchase) => {
+  const returnedMap = await getReturnedQuantities(purchase.invoice_number, "purchase");
+  let allFullyReturned = true;
+  purchase.items = purchase.items.map(item => {
+    const productIdStr = item.product_id._id ? item.product_id._id.toString() : item.product_id.toString();
+    const key = `${productIdStr}_${item.batch}`;
+    const alreadyReturned = returnedMap[key] || 0;
+    const remainingQty = Math.max(item.units - alreadyReturned, 0);
+    if (remainingQty > 0) {
+      allFullyReturned = false;
+    }
+    return {
+      ...item,
+      alreadyReturned,
+      remainingQty
+    };
+  });
+  return { purchase, allFullyReturned };
+};
+
 const getPurchaseForReturn = async (req, res) => {
   try {
     const { invoice_number, supplier_id } = req.query;
@@ -555,32 +599,49 @@ const getPurchaseForReturn = async (req, res) => {
     let purchases;
 
     if (invoice_number) {
-      purchases = await Order.findOne(filter)
+      const purchase = await Order.findOne(filter)
         .populate("supplier_id") // ✅ attach supplier info
         .lean();
 
-      if (!purchases) {
+      if (!purchase) {
         return sendError(res, "Purchase order not found", 404);
       }
 
       // attach items + product info
-      purchases.items = await OrderItemModel.find({ order_id: purchases._id })
+      purchase.items = await OrderItemModel.find({ order_id: purchase._id })
         .populate("product_id")
         .lean();
+
+      const { purchase: enrichedPurchase, allFullyReturned } = await enrichPurchaseWithReturns(purchase);
+      if (allFullyReturned) {
+        return sendError(res, "This invoice is already fully returned", 400);
+      }
+      purchases = enrichedPurchase;
     } else {
-      purchases = await Order.find(filter)
+      const rawPurchases = await Order.find(filter)
         .populate("supplier_id") // ✅ attach supplier info
         .lean();
 
-      if (!purchases || purchases.length === 0) {
+      if (!rawPurchases || rawPurchases.length === 0) {
         return sendError(res, "No purchases found for this supplier", 404);
       }
 
-      for (let order of purchases) {
+      const activePurchases = [];
+      for (let order of rawPurchases) {
         order.items = await OrderItemModel.find({ order_id: order._id })
           .populate("product_id")
           .lean();
+
+        const { purchase: enrichedPurchase, allFullyReturned } = await enrichPurchaseWithReturns(order);
+        if (!allFullyReturned) {
+          activePurchases.push(enrichedPurchase);
+        }
       }
+
+      if (activePurchases.length === 0) {
+        return sendError(res, "No purchases available for return (all invoices are fully returned)", 404);
+      }
+      purchases = activePurchases;
     }
 
     return successResponse(res, "Purchase order retrieved", { purchases });
@@ -620,6 +681,24 @@ const returnPurchaseByInvoice = async (req, res) => {
       return sendError(res, "Supplier not found", 404);
     }
 
+    // Get all previous return items for this invoice to compute already returned quantities
+    const returnOrders = await Order.find({
+      invoice_number: invoice_number + "-R",
+      type: "purchase_return"
+    }).session(session);
+
+    const returnOrderIds = returnOrders.map(ro => ro._id);
+    const returnedItems = await OrderItemModel.find({
+      order_id: { $in: returnOrderIds }
+    }).session(session);
+
+    const returnedMap = {};
+    for (const ri of returnedItems) {
+      const productIdStr = ri.product_id._id ? ri.product_id._id.toString() : ri.product_id.toString();
+      const key = `${productIdStr}_${ri.batch}`;
+      returnedMap[key] = (returnedMap[key] || 0) + ri.units;
+    }
+
     // Calculate total return amount based on actual total from OrderItem
     let totalReturn = 0;
     const orderItemsMap = {};
@@ -640,11 +719,16 @@ const returnPurchaseByInvoice = async (req, res) => {
         );
       }
 
-      if (orderItem.units < item.units) {
+      const productIdStr = item.product_id.toString();
+      const key = `${productIdStr}_${item.batch}`;
+      const alreadyReturned = returnedMap[key] || 0;
+      const remainingQty = Math.max(orderItem.units - alreadyReturned, 0);
+
+      if (item.units > remainingQty) {
         await session.abortTransaction();
         return sendError(
           res,
-          `Return quantity exceeds purchased units for batch: ${item.batch}`,
+          `You can only return the remaining available stock for batch ${item.batch}, which is ${remainingQty} unit(s).`,
           400
         );
       }

@@ -693,6 +693,50 @@ const getProductSales = async (req, res) => {
   }
 };
 
+// Helper functions for tracking returns
+const getReturnedQuantities = async (invoiceNumber, type) => {
+  const returnType = type === "sale" ? "sale_return" : "purchase_return";
+  const returnOrders = await Order.find({
+    invoice_number: invoiceNumber + "-R",
+    type: returnType
+  }).select("_id");
+
+  if (!returnOrders.length) return {};
+
+  const returnOrderIds = returnOrders.map(ro => ro._id);
+  const returnedItems = await OrderItemModel.find({
+    order_id: { $in: returnOrderIds }
+  });
+
+  const returnedMap = {};
+  for (const item of returnedItems) {
+    const productIdStr = item.product_id._id ? item.product_id._id.toString() : item.product_id.toString();
+    const key = `${productIdStr}_${item.batch}`;
+    returnedMap[key] = (returnedMap[key] || 0) + item.units;
+  }
+  return returnedMap;
+};
+
+const enrichSaleWithReturns = async (sale) => {
+  const returnedMap = await getReturnedQuantities(sale.invoice_number, "sale");
+  let allFullyReturned = true;
+  sale.items = sale.items.map(item => {
+    const productIdStr = item.product_id._id ? item.product_id._id.toString() : item.product_id.toString();
+    const key = `${productIdStr}_${item.batch}`;
+    const alreadyReturned = returnedMap[key] || 0;
+    const remainingQty = Math.max(item.units - alreadyReturned, 0);
+    if (remainingQty > 0) {
+      allFullyReturned = false;
+    }
+    return {
+      ...item,
+      alreadyReturned,
+      remainingQty
+    };
+  });
+  return { sale, allFullyReturned };
+};
+
 // Controller: get sale for return
 const getSaleForReturn = async (req, res) => {
   try {
@@ -710,34 +754,51 @@ const getSaleForReturn = async (req, res) => {
     let sales;
 
     if (invoice_number) {
-      sales = await Order.findOne(filter)
+      const sale = await Order.findOne(filter)
         .populate("supplier_id") // attach customer info
         .populate("booker_id") // attach booker info if needed
         .lean();
 
-      if (!sales) {
+      if (!sale) {
         return sendError(res, "Sale order not found", 404);
       }
 
       // attach items with product info
-      sales.items = await OrderItemModel.find({ order_id: sales._id })
+      sale.items = await OrderItemModel.find({ order_id: sale._id })
         .populate("product_id")
         .lean();
+
+      const { sale: enrichedSale, allFullyReturned } = await enrichSaleWithReturns(sale);
+      if (allFullyReturned) {
+        return sendError(res, "This invoice is already fully returned", 400);
+      }
+      sales = enrichedSale;
     } else {
-      sales = await Order.find(filter)
+      const rawSales = await Order.find(filter)
         .populate("supplier_id")
         .populate("booker_id")
         .lean();
 
-      if (!sales || sales.length === 0) {
+      if (!rawSales || rawSales.length === 0) {
         return sendError(res, "No sales found for this customer", 404);
       }
 
-      for (let order of sales) {
+      const activeSales = [];
+      for (let order of rawSales) {
         order.items = await OrderItemModel.find({ order_id: order._id })
           .populate("product_id")
           .lean();
+
+        const { sale: enrichedSale, allFullyReturned } = await enrichSaleWithReturns(order);
+        if (!allFullyReturned) {
+          activeSales.push(enrichedSale);
+        }
       }
+
+      if (activeSales.length === 0) {
+        return sendError(res, "No sales available for return (all invoices are fully returned)", 404);
+      }
+      sales = activeSales;
     }
 
     return successResponse(res, "Sale order retrieved", { sales });
@@ -778,6 +839,24 @@ const returnSaleByInvoice = async (req, res) => {
       return sendError(res, "Customer not found", 404);
     }
 
+    // Get all previous return items for this invoice to compute already returned quantities
+    const returnOrders = await Order.find({
+      invoice_number: invoice_number + "-R",
+      type: "sale_return"
+    }).session(session);
+
+    const returnOrderIds = returnOrders.map(ro => ro._id);
+    const returnedItems = await OrderItemModel.find({
+      order_id: { $in: returnOrderIds }
+    }).session(session);
+
+    const returnedMap = {};
+    for (const ri of returnedItems) {
+      const productIdStr = ri.product_id._id ? ri.product_id._id.toString() : ri.product_id.toString();
+      const key = `${productIdStr}_${ri.batch}`;
+      returnedMap[key] = (returnedMap[key] || 0) + ri.units;
+    }
+
     let totalReturn = 0;
     const orderItemsMap = {};
 
@@ -798,12 +877,17 @@ const returnSaleByInvoice = async (req, res) => {
         );
       }
 
-      if (orderItem.units < item.units) {
+      const productIdStr = item.product_id.toString();
+      const key = `${productIdStr}_${item.batch}`;
+      const alreadyReturned = returnedMap[key] || 0;
+      const remainingQty = Math.max(orderItem.units - alreadyReturned, 0);
+
+      if (item.units > remainingQty) {
         await session.abortTransaction();
         return sendError(
           res,
-          `Return quantity exceeds sold units for batch: ${item.batch}`,
-          400,
+          `You can only return the remaining available stock for batch ${item.batch}, which is ${remainingQty} unit(s).`,
+          400
         );
       }
 
@@ -2167,7 +2251,7 @@ const editSale = async (req, res) => {
       if (req.body.invoice_number && req.body.invoice_number.startsWith("SALE-")) {
         isDraftInvoice = false;
       }
-      
+
       if (isDraftInvoice) {
         const completedInvoices = await Order.find({
           status: "completed",
