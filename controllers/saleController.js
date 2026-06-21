@@ -141,7 +141,7 @@ const createSale = async (req, res) => {
       subtotal,
       total,
       paid_amount,
-      due_amount: balanceResult.pay || 0,
+      due_amount: (balanceResult.pay || 0) - (balanceResult.receive || 0),
       net_value,
       note,
       due_date,
@@ -858,6 +858,7 @@ const returnSaleByInvoice = async (req, res) => {
     }
 
     let totalReturn = 0;
+    let totalReturnWithTax = 0;
     const orderItemsMap = {};
 
     // Validate items and calculate total return
@@ -896,13 +897,18 @@ const returnSaleByInvoice = async (req, res) => {
       const returnTotal = unitTotal * item.units;
       totalReturn += returnTotal;
 
-      orderItemsMap[item.batch] = { orderItem, returnTotal };
+      // Include sales tax for refund / customer balance update
+      const taxPerUnit = orderItem.sales_tax || 0;
+      const returnTotalWithTax = (unitTotal + taxPerUnit) * item.units;
+      totalReturnWithTax += returnTotalWithTax;
+
+      orderItemsMap[item.batch] = { orderItem, returnTotal, returnTotalWithTax };
     }
 
-    // Deduct from customer's pay
+    // Deduct from customer's pay (using tax-inclusive return total)
     await Supplier.findByIdAndUpdate(
       customer._id,
-      { pay: Math.max((customer.pay || 0) - totalReturn, 0) },
+      { pay: Math.max((customer.pay || 0) - totalReturnWithTax, 0) },
       { session },
     );
 
@@ -913,11 +919,11 @@ const returnSaleByInvoice = async (req, res) => {
           invoice_number: invoice_number + "-R",
           supplier_id: customer._id,
           booker_id: saleOrder.booker_id || null,
-          subtotal: totalReturn,
-          total: totalReturn,
+          subtotal: totalReturnWithTax,
+          total: totalReturnWithTax,
           paid_amount: 0,
-          due_amount: totalReturn,
-          net_value: totalReturn,
+          due_amount: totalReturnWithTax,
+          net_value: totalReturnWithTax,
           type: "sale_return",
           status: "returned",
         },
@@ -931,7 +937,7 @@ const returnSaleByInvoice = async (req, res) => {
 
     // Process each return item
     for (const item of items) {
-      const { orderItem, returnTotal } = orderItemsMap[item.batch];
+      const { orderItem, returnTotal, returnTotalWithTax } = orderItemsMap[item.batch];
 
       // Deduct units from original order item
       // orderItem.units -= item.units;
@@ -975,10 +981,10 @@ const returnSaleByInvoice = async (req, res) => {
 
     if (batchUpdates.length) await Batch.bulkWrite(batchUpdates, { session });
 
-    // ✅ Deduct returned amount and profit from original sale order
+    // ✅ Deduct returned amount and profit from original sale order (using tax-inclusive return total)
     await Order.findByIdAndUpdate(
       saleOrder._id,
-      { $inc: { total: -totalReturn, profit: -returnedProfit } },
+      { $inc: { total: -totalReturnWithTax, profit: -returnedProfit } },
       { session },
     );
 
@@ -1853,7 +1859,7 @@ export const completeSale = async (req, res) => {
     );
 
     // ✅ Override due_amount with calculated due_amount and update createdAt
-    sale.due_amount = updatedPay;
+    sale.due_amount = updatedPay - updatedReceive;
     sale.createdAt = new Date();
 
     /* =====================================================
@@ -2289,7 +2295,7 @@ const editSale = async (req, res) => {
     sale.paid_amount = newPaidAmount;
 
     if (newStatus === "completed") {
-      sale.due_amount = Number(updatedCustomerAfterBalance?.pay || 0);
+      sale.due_amount = Number((updatedCustomerAfterBalance?.pay || 0) - (updatedCustomerAfterBalance?.receive || 0));
     } else {
       sale.due_amount = req.body.due_amount ?? newInvoiceDue;
     }
