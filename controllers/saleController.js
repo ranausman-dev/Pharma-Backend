@@ -13,6 +13,32 @@ import adjustBalance from "../utils/adjustBalance.js";
 import Investor from "../models/investorModel.js";
 import investorProfit from "../models/investorProfit.js";
 
+const applyLedgerEntry = async (investor, type, amount, note, date, session) => {
+  if (!amount || amount <= 0) return;
+
+  investor.debit_credit.push({
+    type,
+    amount,
+    note,
+    date: date || new Date(),
+  });
+
+  if (type === "credit") {
+    investor.credit = (investor.credit || 0) + amount;
+  } else if (type === "debit") {
+    if ((investor.credit || 0) >= amount) {
+      investor.credit -= amount;
+    } else {
+      const remaining = amount - (investor.credit || 0);
+      investor.credit = 0;
+      investor.debit = (investor.debit || 0) + remaining;
+    }
+  }
+
+  investor.net_balance = (investor.credit || 0) - (investor.debit || 0);
+  await investor.save({ session });
+};
+
 const createSale = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -314,6 +340,11 @@ const createSale = async (req, res) => {
 
     // Loop investors
     for (const inv of investors) {
+      if (inv.name === "Company") {
+        companyRecord = inv;
+        continue;
+      }
+
       console.log("Checking investor:", inv.name, "Join date:", inv.join_date);
 
       const joinDate = new Date(inv.join_date);
@@ -373,19 +404,32 @@ const createSale = async (req, res) => {
         { session },
       );
 
-      inv.credit = (inv.credit || 0) + invShare;
-      await inv.save({ session });
+      // Record transaction in ledger and update balances
+      await applyLedgerEntry(
+        inv,
+        "credit",
+        invShare,
+        `Profit share for Invoice: ${invoice_number}`,
+        today,
+        session
+      );
 
-      // Add the company share to company record
+      // Record company contribution in company ledger
       if (companyRecord) {
-        companyRecord.credit = (companyRecord.credit || 0) + companyShare;
+        await applyLedgerEntry(
+          companyRecord,
+          "credit",
+          companyShare,
+          `Company share from ${inv.name} for Invoice: ${invoice_number}`,
+          today,
+          session
+        );
       }
     }
 
     // Finally, add company’s own direct share
     if (companyRecord) {
       const companyOwnShare = (distributable * companyRecord.shares) / 100;
-      const totalCompanyShare = companyOwnShare + (companyRecord.credit || 0);
 
       await investorProfit.create(
         [
@@ -406,8 +450,14 @@ const createSale = async (req, res) => {
         { session },
       );
 
-      companyRecord.credit = totalCompanyShare;
-      await companyRecord.save({ session });
+      await applyLedgerEntry(
+        companyRecord,
+        "credit",
+        companyOwnShare,
+        `Company direct share for Invoice: ${invoice_number}`,
+        today,
+        session
+      );
     }
 
     await session.commitTransaction();
@@ -987,6 +1037,117 @@ const returnSaleByInvoice = async (req, res) => {
       { $inc: { total: -totalReturnWithTax, profit: -returnedProfit } },
       { session },
     );
+
+    // 🔹 Investor Profit Sharing Reversal
+    const returnedExpense = totalReturnWithTax * 0.02;
+    const returnedCharity = returnedProfit * 0.1;
+    const returnedDistributable = returnedProfit - returnedCharity - returnedExpense;
+
+    const investors = await Investor.find({ status: "active" }).session(session);
+    const today = new Date();
+    const monthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+
+    let companyRecord = null;
+
+    for (const inv of investors) {
+      if (inv.name === "Company") {
+        companyRecord = inv;
+        continue;
+      }
+
+      const joinDate = new Date(inv.join_date);
+      let eligible = false;
+
+      if (joinDate <= new Date(today.getFullYear(), today.getMonth(), 1)) {
+        eligible = true;
+      } else if (
+        joinDate.getDate() <= 15 &&
+        joinDate.getMonth() === today.getMonth() &&
+        joinDate.getFullYear() === today.getFullYear()
+      ) {
+        eligible = today.getDate() >= 15;
+      }
+
+      if (!eligible) continue;
+
+      const returnedInvShare = (returnedDistributable * (inv.profit_percentage || 0)) / 100;
+      const returnedCompanyShare = (returnedDistributable * (inv.shares || 0)) / 100 - returnedInvShare;
+
+      // Save negative investor profit record
+      await investorProfit.create(
+        [
+          {
+            investor_id: inv._id,
+            month: monthKey,
+            order_id: returnOrder[0]._id,
+            sales: -totalReturnWithTax,
+            gross_profit: -returnedProfit,
+            expense: -returnedExpense,
+            charity: -returnedCharity,
+            net_profit: -returnedDistributable,
+            investor_share: -returnedInvShare,
+            owner_share: -returnedCompanyShare,
+            total: -totalReturnWithTax,
+          },
+        ],
+        { session }
+      );
+
+      // Record transaction in ledger (debit for returned profit) and update balances
+      await applyLedgerEntry(
+        inv,
+        "debit",
+        returnedInvShare,
+        `Returned Profit Share for Invoice: ${invoice_number}`,
+        today,
+        session
+      );
+
+      // Record company contribution reversal in company ledger
+      if (companyRecord) {
+        await applyLedgerEntry(
+          companyRecord,
+          "debit",
+          returnedCompanyShare,
+          `Returned Company share from ${inv.name} for Invoice: ${invoice_number}`,
+          today,
+          session
+        );
+      }
+    }
+
+    // Finally, add company's own direct returned share
+    if (companyRecord) {
+      const companyOwnReturnedShare = (returnedDistributable * companyRecord.shares) / 100;
+
+      await investorProfit.create(
+        [
+          {
+            investor_id: companyRecord._id,
+            month: monthKey,
+            order_id: returnOrder[0]._id,
+            sales: -totalReturnWithTax,
+            gross_profit: -returnedProfit,
+            expense: -returnedExpense,
+            charity: -returnedCharity,
+            net_profit: -returnedDistributable,
+            investor_share: 0,
+            owner_share: -companyOwnReturnedShare,
+            total: -totalReturnWithTax,
+          },
+        ],
+        { session }
+      );
+
+      await applyLedgerEntry(
+        companyRecord,
+        "debit",
+        companyOwnReturnedShare,
+        `Returned Company direct share for Invoice: ${invoice_number}`,
+        today,
+        session
+      );
+    }
 
     await session.commitTransaction();
 
@@ -1993,6 +2154,11 @@ export const completeSale = async (req, res) => {
 
     // Loop investors
     for (const inv of investors) {
+      if (inv.name === "Company") {
+        companyRecord = inv;
+        continue;
+      }
+
       console.log("Checking investor:", inv.name, "Join date:", inv.join_date);
 
       const joinDate = new Date(inv.join_date);
@@ -2052,19 +2218,32 @@ export const completeSale = async (req, res) => {
         { session },
       );
 
-      inv.credit = (inv.credit || 0) + invShare;
-      await inv.save({ session });
+      // Record transaction in ledger and update balances
+      await applyLedgerEntry(
+        inv,
+        "credit",
+        invShare,
+        `Profit share for Invoice: ${sale.invoice_number}`,
+        today,
+        session
+      );
 
-      // Add the company share to company record
+      // Record company contribution in company ledger
       if (companyRecord) {
-        companyRecord.credit = (companyRecord.credit || 0) + companyShare;
+        await applyLedgerEntry(
+          companyRecord,
+          "credit",
+          companyShare,
+          `Company share from ${inv.name} for Invoice: ${sale.invoice_number}`,
+          today,
+          session
+        );
       }
     }
 
     // Finally, add company's own direct share
     if (companyRecord) {
       const companyOwnShare = (distributable * companyRecord.shares) / 100;
-      const totalCompanyShare = companyOwnShare + (companyRecord.credit || 0);
 
       await investorProfit.create(
         [
@@ -2085,8 +2264,14 @@ export const completeSale = async (req, res) => {
         { session },
       );
 
-      companyRecord.credit = totalCompanyShare;
-      await companyRecord.save({ session });
+      await applyLedgerEntry(
+        companyRecord,
+        "credit",
+        companyOwnShare,
+        `Company direct share for Invoice: ${sale.invoice_number}`,
+        today,
+        session
+      );
     }
 
     /* =====================================================
@@ -2457,17 +2642,31 @@ const editSale = async (req, res) => {
           { session }
         );
 
-        inv.credit = (inv.credit || 0) + invShare;
-        await inv.save({ session });
+        // Record transaction in ledger and update balances
+        await applyLedgerEntry(
+          inv,
+          "credit",
+          invShare,
+          `Profit share for Invoice: ${sale.invoice_number}`,
+          today,
+          session
+        );
 
+        // Record company contribution in company ledger
         if (companyRecord) {
-          companyRecord.credit = (companyRecord.credit || 0) + companyShare;
+          await applyLedgerEntry(
+            companyRecord,
+            "credit",
+            companyShare,
+            `Company share from ${inv.name} for Invoice: ${sale.invoice_number}`,
+            today,
+            session
+          );
         }
       }
 
       if (companyRecord) {
         const companyOwnShare = (distributable * companyRecord.shares) / 100;
-        const totalCompanyShare = companyOwnShare + (companyRecord.credit || 0);
 
         await investorProfit.create(
           [
@@ -2488,8 +2687,14 @@ const editSale = async (req, res) => {
           { session }
         );
 
-        companyRecord.credit = totalCompanyShare;
-        await companyRecord.save({ session });
+        await applyLedgerEntry(
+          companyRecord,
+          "credit",
+          companyOwnShare,
+          `Company direct share for Invoice: ${sale.invoice_number}`,
+          today,
+          session
+        );
       }
     }
 
