@@ -1,4 +1,5 @@
 import { SupplierModel } from "../models/supplierModel.js";
+import { OrderModel } from "../models/orderModel.js";
 import { sendError, successResponse } from "../utils/response.js";
 
 export const getAllSuppliers = async (req, res) => {
@@ -415,6 +416,200 @@ export const addSupplierBalance = async (req, res) => {
   }
 };
 
+export const getSupplierLedger = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { startDate, endDate, ledgerType } = req.query;
+
+    const party = await SupplierModel.findById(id).populate("area_id", "name");
+    if (!party) return sendError(res, "Party not found", 404);
+
+    // Fetch all completed/recovered/returned orders
+    const orderQuery = {
+      supplier_id: id,
+      type: { $in: ["purchase", "sale", "purchase_return", "sale_return"] },
+      status: { $in: ["completed", "returned", "recovered"] },
+    };
+
+    const orders = await OrderModel.find(orderQuery)
+      .sort({ createdAt: 1 })
+      .lean();
+
+    let ledger = [];
+
+    // 1. Opening Balance entry
+    const openingDate = party.createdAt || new Date(0);
+    if (party.opening_balance && party.opening_balance > 0) {
+      ledger.push({
+        _id: `opening_${party._id}`,
+        date: openingDate,
+        description: "Opening Balance",
+        debit: party.balanceType === "pay" ? party.opening_balance : 0,
+        credit: party.balanceType === "receive" ? party.opening_balance : 0,
+        isOpening: true,
+      });
+    }
+
+    // 2. Generate ledger entries from orders
+    orders.forEach((order) => {
+      const date = order.createdAt;
+
+      if (order.type === "sale") {
+        // Sale Invoice
+        ledger.push({
+          _id: `${order._id}_sale`,
+          order_id: order._id,
+          date,
+          description: `Sale Invoice (Invoice #: ${order.invoice_number})`,
+          debit: order.total || 0,
+          credit: 0,
+          type: order.type,
+        });
+
+        // Initial Payment
+        if (order.paid_amount && order.paid_amount > 0) {
+          ledger.push({
+            _id: `${order._id}_payment`,
+            order_id: order._id,
+            date,
+            description: `Payment Received (Invoice #: ${order.invoice_number})`,
+            debit: 0,
+            credit: order.paid_amount,
+            type: order.type,
+          });
+        }
+
+        // Subsequent Recoveries
+        if (order.recovered_amount && order.recovered_amount > 0) {
+          ledger.push({
+            _id: `${order._id}_recovery`,
+            order_id: order._id,
+            date: order.recovered_date || order.updatedAt || date,
+            description: `Recovery Payment (Invoice #: ${order.invoice_number})`,
+            debit: 0,
+            credit: order.recovered_amount,
+            type: order.type,
+          });
+        }
+      } else if (order.type === "purchase") {
+        // Purchase Invoice
+        ledger.push({
+          _id: `${order._id}_purchase`,
+          order_id: order._id,
+          date,
+          description: `Purchase Invoice (Purchase #: ${order.purchase_number || order.invoice_number})`,
+          debit: 0,
+          credit: order.total || 0,
+          type: order.type,
+        });
+
+        // Initial Payment
+        if (order.paid_amount && order.paid_amount > 0) {
+          ledger.push({
+            _id: `${order._id}_payment`,
+            order_id: order._id,
+            date,
+            description: `Payment Paid (Purchase #: ${order.purchase_number || order.invoice_number})`,
+            debit: order.paid_amount,
+            credit: 0,
+            type: order.type,
+          });
+        }
+      } else if (order.type === "sale_return") {
+        ledger.push({
+          _id: `${order._id}_return`,
+          order_id: order._id,
+          date,
+          description: `Sale Return (Invoice #: ${order.invoice_number})`,
+          debit: 0,
+          credit: order.total || 0,
+          type: order.type,
+        });
+      } else if (order.type === "purchase_return") {
+        ledger.push({
+          _id: `${order._id}_return`,
+          order_id: order._id,
+          date,
+          description: `Purchase Return (Invoice #: ${order.invoice_number})`,
+          debit: order.total || 0,
+          credit: 0,
+          type: order.type,
+        });
+      }
+    });
+
+    // Sort entries chronologically
+    ledger.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    // Determine perspective
+    const typeOfLedger = ledgerType || (party.role === "customer" ? "customer" : "supplier");
+
+    // Compute running balance
+    let runningBalance = 0;
+    ledger = ledger.map((entry) => {
+      const dr = entry.debit || 0;
+      const cr = entry.credit || 0;
+
+      if (typeOfLedger === "customer") {
+        runningBalance += (dr - cr);
+      } else {
+        runningBalance += (cr - dr);
+      }
+
+      return {
+        ...entry,
+        runningBalance,
+      };
+    });
+
+    // Apply date range
+    let finalLedger = [];
+    let openingBalanceForPeriod = 0;
+
+    if (startDate) {
+      const start = new Date(startDate);
+      const preEntries = ledger.filter((e) => new Date(e.date) < start);
+      if (preEntries.length > 0) {
+        openingBalanceForPeriod = preEntries[preEntries.length - 1].runningBalance;
+      }
+
+      const rangeEntries = ledger.filter((e) => {
+        const d = new Date(e.date);
+        if (d < start) return false;
+        if (endDate && d > new Date(endDate)) return false;
+        return true;
+      });
+
+      finalLedger.push({
+        _id: "carried_forward",
+        date: start,
+        description: "Balance Carried Forward",
+        debit: 0,
+        credit: 0,
+        runningBalance: openingBalanceForPeriod,
+        isCarriedForward: true,
+      });
+
+      finalLedger = [...finalLedger, ...rangeEntries];
+    } else {
+      if (endDate) {
+        finalLedger = ledger.filter((e) => new Date(e.date) <= new Date(endDate));
+      } else {
+        finalLedger = ledger;
+      }
+    }
+
+    return successResponse(res, "Ledger fetched successfully", {
+      party,
+      ledger: finalLedger,
+      ledgerType: typeOfLedger,
+    });
+  } catch (error) {
+    console.error("Ledger Fetch Error:", error);
+    return sendError(res, "Failed to fetch ledger", 500);
+  }
+};
+
 const supplierController = {
   getAllSuppliers,
   getSupplierById,
@@ -426,6 +621,7 @@ const supplierController = {
   toggleSupplierStatus,
   addSupplierBalance,
   getAllActiveSuppliersAndCustomers,
+  getSupplierLedger,
 };
 
 export default supplierController;

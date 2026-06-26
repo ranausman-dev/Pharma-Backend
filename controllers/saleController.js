@@ -1043,110 +1043,180 @@ const returnSaleByInvoice = async (req, res) => {
     const returnedCharity = returnedProfit * 0.1;
     const returnedDistributable = returnedProfit - returnedCharity - returnedExpense;
 
-    const investors = await Investor.find({ status: "active" }).session(session);
+    const originalProfits = await investorProfit.find({ order_id: saleOrder._id }).session(session);
     const today = new Date();
     const monthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
 
-    let companyRecord = null;
+    if (originalProfits && originalProfits.length > 0) {
+      const companyRecord = await Investor.findOne({ name: "Company" }).session(session);
+      const originalDistributable = originalProfits[0].net_profit || 1;
+      const fraction = originalDistributable > 0 ? returnedDistributable / originalDistributable : 0;
 
-    for (const inv of investors) {
-      if (inv.name === "Company") {
-        companyRecord = inv;
-        continue;
+      for (const origProfit of originalProfits) {
+        const inv = await Investor.findById(origProfit.investor_id).session(session);
+        if (!inv) continue;
+
+        const returnedInvShare = origProfit.investor_share * fraction;
+        const returnedCompanyShare = origProfit.owner_share * fraction;
+
+        // Save negative investor profit record
+        await investorProfit.create(
+          [
+            {
+              investor_id: inv._id,
+              month: monthKey,
+              order_id: returnOrder[0]._id,
+              sales: -(origProfit.sales * fraction),
+              gross_profit: -(origProfit.gross_profit * fraction),
+              expense: -(origProfit.expense * fraction),
+              charity: -(origProfit.charity * fraction),
+              net_profit: -(origProfit.net_profit * fraction),
+              investor_share: -returnedInvShare,
+              owner_share: -returnedCompanyShare,
+              total: -(origProfit.total * fraction),
+            },
+          ],
+          { session }
+        );
+
+        if (inv.name === "Company") {
+          // Company direct share
+          await applyLedgerEntry(
+            inv,
+            "debit",
+            returnedCompanyShare,
+            `Returned Company direct share for Invoice: ${invoice_number}`,
+            today,
+            session
+          );
+        } else {
+          // Regular investor share
+          await applyLedgerEntry(
+            inv,
+            "debit",
+            returnedInvShare,
+            `Returned Profit Share for Invoice: ${invoice_number}`,
+            today,
+            session
+          );
+
+          // Company share from this investor
+          if (companyRecord) {
+            await applyLedgerEntry(
+              companyRecord,
+              "debit",
+              returnedCompanyShare,
+              `Returned Company share from ${inv.name} for Invoice: ${invoice_number}`,
+              today,
+              session
+            );
+          }
+        }
+      }
+    } else {
+      // Fallback to active/eligible investors logic if no original profits recorded
+      const investors = await Investor.find({ status: "active" }).session(session);
+      let companyRecord = null;
+
+      for (const inv of investors) {
+        if (inv.name === "Company") {
+          companyRecord = inv;
+          continue;
+        }
+
+        const joinDate = new Date(inv.join_date);
+        let eligible = false;
+
+        if (joinDate <= new Date(today.getFullYear(), today.getMonth(), 1)) {
+          eligible = true;
+        } else if (
+          joinDate.getDate() <= 15 &&
+          joinDate.getMonth() === today.getMonth() &&
+          joinDate.getFullYear() === today.getFullYear()
+        ) {
+          eligible = today.getDate() >= 15;
+        }
+
+        if (!eligible) continue;
+
+        const returnedInvShare = (returnedDistributable * (inv.profit_percentage || 0)) / 100;
+        const returnedCompanyShare = (returnedDistributable * (inv.shares || 0)) / 100 - returnedInvShare;
+
+        // Save negative investor profit record
+        await investorProfit.create(
+          [
+            {
+              investor_id: inv._id,
+              month: monthKey,
+              order_id: returnOrder[0]._id,
+              sales: -totalReturnWithTax,
+              gross_profit: -returnedProfit,
+              expense: -returnedExpense,
+              charity: -returnedCharity,
+              net_profit: -returnedDistributable,
+              investor_share: -returnedInvShare,
+              owner_share: -returnedCompanyShare,
+              total: -totalReturnWithTax,
+            },
+          ],
+          { session }
+        );
+
+        // Record transaction in ledger (debit for returned profit) and update balances
+        await applyLedgerEntry(
+          inv,
+          "debit",
+          returnedInvShare,
+          `Returned Profit Share for Invoice: ${invoice_number}`,
+          today,
+          session
+        );
+
+        // Record company contribution reversal in company ledger
+        if (companyRecord) {
+          await applyLedgerEntry(
+            companyRecord,
+            "debit",
+            returnedCompanyShare,
+            `Returned Company share from ${inv.name} for Invoice: ${invoice_number}`,
+            today,
+            session
+          );
+        }
       }
 
-      const joinDate = new Date(inv.join_date);
-      let eligible = false;
-
-      if (joinDate <= new Date(today.getFullYear(), today.getMonth(), 1)) {
-        eligible = true;
-      } else if (
-        joinDate.getDate() <= 15 &&
-        joinDate.getMonth() === today.getMonth() &&
-        joinDate.getFullYear() === today.getFullYear()
-      ) {
-        eligible = today.getDate() >= 15;
-      }
-
-      if (!eligible) continue;
-
-      const returnedInvShare = (returnedDistributable * (inv.profit_percentage || 0)) / 100;
-      const returnedCompanyShare = (returnedDistributable * (inv.shares || 0)) / 100 - returnedInvShare;
-
-      // Save negative investor profit record
-      await investorProfit.create(
-        [
-          {
-            investor_id: inv._id,
-            month: monthKey,
-            order_id: returnOrder[0]._id,
-            sales: -totalReturnWithTax,
-            gross_profit: -returnedProfit,
-            expense: -returnedExpense,
-            charity: -returnedCharity,
-            net_profit: -returnedDistributable,
-            investor_share: -returnedInvShare,
-            owner_share: -returnedCompanyShare,
-            total: -totalReturnWithTax,
-          },
-        ],
-        { session }
-      );
-
-      // Record transaction in ledger (debit for returned profit) and update balances
-      await applyLedgerEntry(
-        inv,
-        "debit",
-        returnedInvShare,
-        `Returned Profit Share for Invoice: ${invoice_number}`,
-        today,
-        session
-      );
-
-      // Record company contribution reversal in company ledger
+      // Finally, add company's own direct returned share
       if (companyRecord) {
+        const companyOwnReturnedShare = (returnedDistributable * companyRecord.shares) / 100;
+
+        await investorProfit.create(
+          [
+            {
+              investor_id: companyRecord._id,
+              month: monthKey,
+              order_id: returnOrder[0]._id,
+              sales: -totalReturnWithTax,
+              gross_profit: -returnedProfit,
+              expense: -returnedExpense,
+              charity: -returnedCharity,
+              net_profit: -returnedDistributable,
+              investor_share: 0,
+              owner_share: -companyOwnReturnedShare,
+              total: -totalReturnWithTax,
+            },
+          ],
+          { session }
+        );
+
         await applyLedgerEntry(
           companyRecord,
           "debit",
-          returnedCompanyShare,
-          `Returned Company share from ${inv.name} for Invoice: ${invoice_number}`,
+          companyOwnReturnedShare,
+          `Returned Company direct share for Invoice: ${invoice_number}`,
           today,
           session
         );
       }
-    }
-
-    // Finally, add company's own direct returned share
-    if (companyRecord) {
-      const companyOwnReturnedShare = (returnedDistributable * companyRecord.shares) / 100;
-
-      await investorProfit.create(
-        [
-          {
-            investor_id: companyRecord._id,
-            month: monthKey,
-            order_id: returnOrder[0]._id,
-            sales: -totalReturnWithTax,
-            gross_profit: -returnedProfit,
-            expense: -returnedExpense,
-            charity: -returnedCharity,
-            net_profit: -returnedDistributable,
-            investor_share: 0,
-            owner_share: -companyOwnReturnedShare,
-            total: -totalReturnWithTax,
-          },
-        ],
-        { session }
-      );
-
-      await applyLedgerEntry(
-        companyRecord,
-        "debit",
-        companyOwnReturnedShare,
-        `Returned Company direct share for Invoice: ${invoice_number}`,
-        today,
-        session
-      );
     }
 
     await session.commitTransaction();
@@ -1877,6 +1947,53 @@ const deleteSale = async (req, res) => {
       { session },
     );
 
+    // Revert investor profit shares if completed
+    if (order.status === "completed") {
+      const oldProfits = await investorProfit.find({ order_id: orderId }).session(session);
+      const companyRecord = await Investor.findOne({ name: "Company" }).session(session);
+      const today = new Date();
+
+      for (const oldProfit of oldProfits) {
+        const inv = await Investor.findById(oldProfit.investor_id).session(session);
+        if (!inv) continue;
+
+        if (inv.name === "Company") {
+          // Revert Company direct share
+          await applyLedgerEntry(
+            inv,
+            "debit",
+            oldProfit.owner_share,
+            `Revert Company direct share for deleted Invoice: ${order.invoice_number}`,
+            today,
+            session
+          );
+        } else {
+          // Revert regular investor share
+          await applyLedgerEntry(
+            inv,
+            "debit",
+            oldProfit.investor_share,
+            `Revert Profit Share for deleted Invoice: ${order.invoice_number}`,
+            today,
+            session
+          );
+
+          // Revert Company share contribution
+          if (companyRecord) {
+            await applyLedgerEntry(
+              companyRecord,
+              "debit",
+              oldProfit.owner_share,
+              `Revert Company share from ${inv.name} for deleted Invoice: ${order.invoice_number}`,
+              today,
+              session
+            );
+          }
+        }
+      }
+      await investorProfit.deleteMany({ order_id: orderId }).session(session);
+    }
+
     // Delete order + items
     await OrderItem.deleteMany({ order_id: orderId }).session(session);
     await Order.findByIdAndDelete(orderId).session(session);
@@ -2585,116 +2702,221 @@ const editSale = async (req, res) => {
     sale.profit = totalOrderProfit;
     await sale.save({ session });
 
-    // 5. Investor Profit Sharing (Only if transition is skipped -> completed)
-    let distributable = 0;
-    if (oldStatus === "skipped" && newStatus === "completed") {
-      const grossSale = sale.total;
-      const expense = grossSale * 0.02;
-      const profit = totalOrderProfit;
-      const charity = profit * 0.1;
-      distributable = profit - charity - expense;
-
-      const investors = await Investor.find({ status: "active" }).session(session);
+    // 5. Investor Profit Sharing
+    if (oldStatus === "completed" || newStatus === "completed") {
       const today = new Date();
       const monthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+      let companyRecord = await Investor.findOne({ name: "Company" }).session(session);
 
-      let companyRecord = null;
+      // Revert old profits if it was previously completed
+      let oldProfitsList = [];
+      if (oldStatus === "completed") {
+        const oldProfits = await investorProfit.find({ order_id: sale._id }).session(session);
+        oldProfitsList = [...oldProfits];
 
-      for (const inv of investors) {
-        if (inv.name === "Company") {
-          companyRecord = inv;
-          continue;
+        for (const oldProfit of oldProfitsList) {
+          const inv = await Investor.findById(oldProfit.investor_id).session(session);
+          if (!inv) continue;
+
+          if (inv.name === "Company") {
+            await applyLedgerEntry(
+              inv,
+              "debit",
+              oldProfit.owner_share,
+              `Revert Company direct share for edited Invoice: ${sale.invoice_number}`,
+              today,
+              session
+            );
+          } else {
+            await applyLedgerEntry(
+              inv,
+              "debit",
+              oldProfit.investor_share,
+              `Revert Profit Share for edited Invoice: ${sale.invoice_number}`,
+              today,
+              session
+            );
+
+            if (companyRecord) {
+              await applyLedgerEntry(
+                companyRecord,
+                "debit",
+                oldProfit.owner_share,
+                `Revert Company share from ${inv.name} for edited Invoice: ${sale.invoice_number}`,
+                today,
+                session
+              );
+            }
+          }
         }
-        const joinDate = new Date(inv.join_date);
-        let eligible = false;
-
-        if (joinDate <= new Date(today.getFullYear(), today.getMonth(), 1)) {
-          eligible = true;
-        } else if (
-          joinDate.getDate() <= 15 &&
-          joinDate.getMonth() === today.getMonth() &&
-          joinDate.getFullYear() === today.getFullYear()
-        ) {
-          eligible = today.getDate() >= 15;
-        }
-
-        if (!eligible) continue;
-
-        const invShare = (distributable * (inv.profit_percentage || 0)) / 100;
-        const companyShare = (distributable * (inv.shares || 0)) / 100 - invShare;
-
-        await investorProfit.create(
-          [
-            {
-              investor_id: inv._id,
-              month: monthKey,
-              order_id: sale._id,
-              sales: grossSale,
-              gross_profit: profit,
-              expense,
-              charity,
-              net_profit: distributable,
-              investor_share: invShare,
-              owner_share: companyShare,
-              total: grossSale,
-            },
-          ],
-          { session }
-        );
-
-        // Record transaction in ledger and update balances
-        await applyLedgerEntry(
-          inv,
-          "credit",
-          invShare,
-          `Profit share for Invoice: ${sale.invoice_number}`,
-          today,
-          session
-        );
-
-        // Record company contribution in company ledger
-        if (companyRecord) {
-          await applyLedgerEntry(
-            companyRecord,
-            "credit",
-            companyShare,
-            `Company share from ${inv.name} for Invoice: ${sale.invoice_number}`,
-            today,
-            session
-          );
-        }
+        await investorProfit.deleteMany({ order_id: sale._id }).session(session);
       }
 
-      if (companyRecord) {
-        const companyOwnShare = (distributable * companyRecord.shares) / 100;
+      // Apply new profits if the new status is completed
+      if (newStatus === "completed") {
+        const grossSale = sale.total;
+        const expense = grossSale * 0.02;
+        const profit = totalOrderProfit;
+        const charity = profit * 0.1;
+        const distributable = profit - charity - expense;
 
-        await investorProfit.create(
-          [
-            {
-              investor_id: companyRecord._id,
-              month: monthKey,
-              order_id: sale._id,
-              sales: grossSale,
-              gross_profit: profit,
-              expense,
-              charity,
-              net_profit: distributable,
-              investor_share: 0,
-              owner_share: companyOwnShare,
-              total: grossSale,
-            },
-          ],
-          { session }
-        );
+        if (oldProfitsList.length > 0) {
+          const originalDistributable = oldProfitsList[0].net_profit || 1;
+          const fraction = originalDistributable > 0 ? distributable / originalDistributable : 0;
 
-        await applyLedgerEntry(
-          companyRecord,
-          "credit",
-          companyOwnShare,
-          `Company direct share for Invoice: ${sale.invoice_number}`,
-          today,
-          session
-        );
+          for (const oldProfit of oldProfitsList) {
+            const inv = await Investor.findById(oldProfit.investor_id).session(session);
+            if (!inv) continue;
+
+            const newInvShare = oldProfit.investor_share * fraction;
+            const newCompanyShare = oldProfit.owner_share * fraction;
+
+            await investorProfit.create(
+              [
+                {
+                  investor_id: inv._id,
+                  month: monthKey,
+                  order_id: sale._id,
+                  sales: oldProfit.sales * fraction,
+                  gross_profit: oldProfit.gross_profit * fraction,
+                  expense: oldProfit.expense * fraction,
+                  charity: oldProfit.charity * fraction,
+                  net_profit: oldProfit.net_profit * fraction,
+                  investor_share: newInvShare,
+                  owner_share: newCompanyShare,
+                  total: oldProfit.total * fraction,
+                },
+              ],
+              { session }
+            );
+
+            if (inv.name === "Company") {
+              await applyLedgerEntry(
+                inv,
+                "credit",
+                newCompanyShare,
+                `Company direct share for Invoice: ${sale.invoice_number}`,
+                today,
+                session
+              );
+            } else {
+              await applyLedgerEntry(
+                inv,
+                "credit",
+                newInvShare,
+                `Profit share for Invoice: ${sale.invoice_number}`,
+                today,
+                session
+              );
+
+              if (companyRecord) {
+                await applyLedgerEntry(
+                  companyRecord,
+                  "credit",
+                  newCompanyShare,
+                  `Company share from ${inv.name} for Invoice: ${sale.invoice_number}`,
+                  today,
+                  session
+                );
+              }
+            }
+          }
+        } else {
+          // Distribute based on current active investors (new completion)
+          const investors = await Investor.find({ status: "active" }).session(session);
+
+          for (const inv of investors) {
+            if (inv.name === "Company") {
+              continue;
+            }
+            const joinDate = new Date(inv.join_date);
+            let eligible = false;
+            if (joinDate <= new Date(today.getFullYear(), today.getMonth(), 1)) {
+              eligible = true;
+            } else if (
+              joinDate.getDate() <= 15 &&
+              joinDate.getMonth() === today.getMonth() &&
+              joinDate.getFullYear() === today.getFullYear()
+            ) {
+              eligible = today.getDate() >= 15;
+            }
+            if (!eligible) continue;
+
+            const invShare = (distributable * (inv.profit_percentage || 0)) / 100;
+            const companyShare = (distributable * (inv.shares || 0)) / 100 - invShare;
+
+            await investorProfit.create(
+              [
+                {
+                  investor_id: inv._id,
+                  month: monthKey,
+                  order_id: sale._id,
+                  sales: grossSale,
+                  gross_profit: profit,
+                  expense,
+                  charity,
+                  net_profit: distributable,
+                  investor_share: invShare,
+                  owner_share: companyShare,
+                  total: grossSale,
+                },
+              ],
+              { session }
+            );
+
+            await applyLedgerEntry(
+              inv,
+              "credit",
+              invShare,
+              `Profit share for Invoice: ${sale.invoice_number}`,
+              today,
+              session
+            );
+
+            if (companyRecord) {
+              await applyLedgerEntry(
+                companyRecord,
+                "credit",
+                companyShare,
+                `Company share from ${inv.name} for Invoice: ${sale.invoice_number}`,
+                today,
+                session
+              );
+            }
+          }
+
+          if (companyRecord) {
+            const companyOwnShare = (distributable * companyRecord.shares) / 100;
+
+            await investorProfit.create(
+              [
+                {
+                  investor_id: companyRecord._id,
+                  month: monthKey,
+                  order_id: sale._id,
+                  sales: grossSale,
+                  gross_profit: profit,
+                  expense,
+                  charity,
+                  net_profit: distributable,
+                  investor_share: 0,
+                  owner_share: companyOwnShare,
+                  total: grossSale,
+                },
+              ],
+              { session }
+            );
+
+            await applyLedgerEntry(
+              companyRecord,
+              "credit",
+              companyOwnShare,
+              `Company direct share for Invoice: ${sale.invoice_number}`,
+              today,
+              session
+            );
+          }
+        }
       }
     }
 
