@@ -1031,12 +1031,7 @@ const returnSaleByInvoice = async (req, res) => {
 
     if (batchUpdates.length) await Batch.bulkWrite(batchUpdates, { session });
 
-    // ✅ Deduct returned amount and profit from original sale order (using tax-inclusive return total)
-    await Order.findByIdAndUpdate(
-      saleOrder._id,
-      { $inc: { total: -totalReturnWithTax, profit: -returnedProfit } },
-      { session },
-    );
+    // Do not modify original sale order total or profit on return, matching purchase return behavior
 
     // 🔹 Investor Profit Sharing Reversal
     const returnedExpense = totalReturnWithTax * 0.02;
