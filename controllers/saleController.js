@@ -45,7 +45,7 @@ const createSale = async (req, res) => {
 
   try {
     const {
-      invoice_number,
+      invoice_number: inputInvoiceNumber,
       supplier_id, // customer
       booker_id,
       subtotal,
@@ -58,6 +58,8 @@ const createSale = async (req, res) => {
       type = "sale",
       status = "completed",
     } = req.body;
+
+    let invoice_number = inputInvoiceNumber;
 
     console.log("req.body", req.body);
 
@@ -149,6 +151,56 @@ const createSale = async (req, res) => {
       }
     }
 
+    // ===== SAFE INVOICE NUMBER GENERATION (ONLY FOR COMPLETED SALES) =====
+    if (status === "completed") {
+      if (invoice_number) {
+        // Check if the provided invoice number already exists in completed sales
+        const exists = await Order.findOne({
+          invoice_number,
+          status: { $in: ["completed", "recovered", "partially_returned", "partially_recovered"] },
+          type: "sale",
+        }).session(session);
+
+        if (exists) {
+          // Auto-generate the next unique invoice number
+          const completedInvoices = await Order.find({
+            status: { $in: ["completed", "recovered", "partially_returned", "partially_recovered"] },
+            type: "sale",
+            invoice_number: { $regex: /^SALE-\d+$/ },
+          })
+            .select("invoice_number")
+            .session(session);
+
+          let maxInvoice = 0;
+          for (const doc of completedInvoices) {
+            const num = parseInt(doc.invoice_number.replace("SALE-", ""), 10);
+            if (!isNaN(num) && num > maxInvoice) {
+              maxInvoice = num;
+            }
+          }
+          invoice_number = `SALE-${maxInvoice + 1}`;
+        }
+      } else {
+        // Generate a new invoice number since none was provided
+        const completedInvoices = await Order.find({
+          status: { $in: ["completed", "recovered", "partially_returned", "partially_recovered"] },
+          type: "sale",
+          invoice_number: { $regex: /^SALE-\d+$/ },
+        })
+          .select("invoice_number")
+          .session(session);
+
+        let maxInvoice = 0;
+        for (const doc of completedInvoices) {
+          const num = parseInt(doc.invoice_number.replace("SALE-", ""), 10);
+          if (!isNaN(num) && num > maxInvoice) {
+            maxInvoice = num;
+          }
+        }
+        invoice_number = `SALE-${maxInvoice + 1}`;
+      }
+    }
+
     // ===== ORDER CREATION (ALWAYS HAPPENS) =====
     const actualDueForOrder = Number(total) - Number(paid_amount);
     const prevPay = supplierDoc.pay || 0;
@@ -167,7 +219,7 @@ const createSale = async (req, res) => {
       subtotal,
       total,
       paid_amount,
-      due_amount: (balanceResult.pay || 0) - (balanceResult.receive || 0),
+      due_amount: Number((balanceResult.pay - balanceResult.receive).toFixed(2)),
       net_value,
       note,
       due_date,
@@ -200,6 +252,11 @@ const createSale = async (req, res) => {
       const calculatedTotal =
         item.units * item.unit_price - (item.discount || 0);
 
+      const batchDoc = await Batch.findOne({
+        product_id: item.product_id,
+        batch_number: item.batch,
+      }).session(session);
+
       const orderItem = await OrderItem.create(
         [
           {
@@ -212,9 +269,9 @@ const createSale = async (req, res) => {
             discount: item.discount || 0,
             profit: 0, // Will be updated for completed orders
             total: calculatedTotal,
-            retail_price: product.retail_price,
-            trade_price: product.trade_price,
-            sales_tax: product.sales_tax,
+            retail_price: batchDoc ? (batchDoc.retail_price ?? product.retail_price) : product.retail_price,
+            trade_price: batchDoc ? (batchDoc.trade_price ?? product.trade_price) : product.trade_price,
+            sales_tax: batchDoc ? (batchDoc.sales_tax ?? product.sales_tax) : product.sales_tax,
           },
         ],
         { session },
@@ -955,10 +1012,25 @@ const returnSaleByInvoice = async (req, res) => {
       orderItemsMap[item.batch] = { orderItem, returnTotal, returnTotalWithTax };
     }
 
-    // Deduct from customer's pay (using tax-inclusive return total)
+    // Update customer balance safely (using tax-inclusive return total)
+    const currentPay = customer.pay || 0;
+    const currentReceive = customer.receive || 0;
+
+    // A sale return is a credit to the customer. So it decreases what they owe us (pay) or increases our debt to them (receive).
+    const netSaleReturn = currentPay - currentReceive - totalReturnWithTax;
+    let updatedPay = 0;
+    let updatedReceive = 0;
+    if (netSaleReturn >= 0) {
+      updatedPay = netSaleReturn;
+      updatedReceive = 0;
+    } else {
+      updatedPay = 0;
+      updatedReceive = Math.abs(netSaleReturn);
+    }
+
     await Supplier.findByIdAndUpdate(
       customer._id,
-      { pay: Math.max((customer.pay || 0) - totalReturnWithTax, 0) },
+      { pay: Number(updatedPay.toFixed(2)), receive: Number(updatedReceive.toFixed(2)) },
       { session },
     );
 
@@ -1031,7 +1103,18 @@ const returnSaleByInvoice = async (req, res) => {
 
     if (batchUpdates.length) await Batch.bulkWrite(batchUpdates, { session });
 
-    // Do not modify original sale order total or profit on return, matching purchase return behavior
+    // Update return order with calculated returnedProfit
+    await Order.updateOne({ _id: returnOrder[0]._id }, { profit: returnedProfit }).session(session);
+
+    // Update original sale order status
+    const prevReturnedTotal = returnOrders.reduce((sum, r) => sum + (r.total || 0), 0);
+    const totalReturned = prevReturnedTotal + totalReturnWithTax;
+    if (totalReturned >= saleOrder.total - 0.01) {
+      saleOrder.status = "returned";
+    } else {
+      saleOrder.status = "partially_returned";
+    }
+    await saleOrder.save({ session });
 
     // 🔹 Investor Profit Sharing Reversal
     const returnedExpense = totalReturnWithTax * 0.02;
@@ -1575,11 +1658,11 @@ const getBookerSales = async (req, res) => {
     // Count total sales
     const totalItems = await Order.countDocuments({
       booker_id: bookerId,
-      type: "sale",
+      type: { $in: ["sale", "sale_return"] },
     });
 
     // ✅ Fetch all sales for this booker
-    const sales = await Order.find({ booker_id: bookerId, type: "sale" })
+    const sales = await Order.find({ booker_id: bookerId, type: { $in: ["sale", "sale_return"] } })
       .populate("supplier_id", "company_name")
       .populate("booker_id", "name email")
       .sort({ createdAt: -1 })
@@ -1710,14 +1793,15 @@ export const addRecover = async (req, res) => {
   try {
     const {
       orderIds = [],
+      supplierId,
       total_recovery_amount,
       recovery_date,
       recovered_by,
     } = req.body;
     console.log("req.body:", req.body);
 
-    if (!Array.isArray(orderIds) || orderIds.length === 0) {
-      return sendError(res, "At least one order ID is required", 400);
+    if ((!Array.isArray(orderIds) || orderIds.length === 0) && !supplierId) {
+      return sendError(res, "Either order IDs or a Customer ID is required", 400);
     }
     if (!total_recovery_amount || total_recovery_amount <= 0) {
       return sendError(
@@ -1730,51 +1814,89 @@ export const addRecover = async (req, res) => {
       return sendError(res, "Recovered by user ID is required", 400);
     }
 
-    // 🔹 Fetch all orders
-    const orders = await Order.find({ _id: { $in: orderIds } }).session(
-      session,
-    );
-    if (orders.length === 0) {
-      await session.abortTransaction();
-      return sendError(res, "No matching orders found", 404);
+    let finalSupplierId = supplierId;
+    let orders = [];
+
+    if (orderIds && orderIds.length > 0) {
+      orders = await Order.find({ _id: { $in: orderIds } }).session(session);
+      if (orders.length === 0) {
+        await session.abortTransaction();
+        return sendError(res, "No matching orders found", 404);
+      }
+      finalSupplierId = orders[0].supplier_id.toString();
+      const allSameSupplier = orders.every(
+        (o) => o.supplier_id.toString() === finalSupplierId,
+      );
+      if (!allSameSupplier) {
+        await session.abortTransaction();
+        return sendError(
+          res,
+          "All selected invoices must belong to the same supplier",
+          400,
+        );
+      }
+    } else {
+      orders = await Order.find({
+        supplier_id: finalSupplierId,
+        type: "sale",
+        status: { $in: ["completed", "partially_returned", "partially_recovered"] }
+      }).session(session);
     }
 
-    // 🔹 Ensure all orders belong to the same supplier (optional business rule)
-    const supplierId = orders[0].supplier_id.toString();
-    const allSameSupplier = orders.every(
-      (o) => o.supplier_id.toString() === supplierId,
-    );
-    if (!allSameSupplier) {
+    const supplier = await Supplier.findById(finalSupplierId).session(session);
+    if (!supplier) {
+      await session.abortTransaction();
+      return sendError(res, "Customer not found", 404);
+    }
+
+    // 🔹 Validate that the recovery amount does not exceed the customer's current main balance (only for bulk recovery)
+    const mainBalance = (supplier.pay || 0) - (supplier.receive || 0);
+    const isBulkRecovery = !orderIds || orderIds.length === 0;
+    if (isBulkRecovery && total_recovery_amount > mainBalance + 0.01) { // allowance for small floating point inaccuracy
       await session.abortTransaction();
       return sendError(
         res,
-        "All selected invoices must belong to the same supplier",
+        `Recovery amount (Rs ${total_recovery_amount}) cannot exceed the customer's main balance (Rs ${mainBalance.toFixed(2)})`,
         400,
       );
     }
 
-    const supplier = await Supplier.findById(supplierId).session(session);
-    if (!supplier) {
-      await session.abortTransaction();
-      return sendError(res, "Supplier not found", 404);
-    }
+    // Fetch return orders for these invoices
+    const returnInvoices = orders.map(o => `${o.invoice_number}-R`);
+    const returns = await Order.find({
+      invoice_number: { $in: returnInvoices.map(inv => new RegExp("^" + inv)) },
+      type: "sale_return"
+    }).session(session);
+
+    // Helper to calculate true remaining due for an order: total - paid_amount - recovered_amount - returned_amount
+    const getOrderActualDue = (ord) => {
+      const returnedAmount = returns
+        .filter(r => r.invoice_number?.startsWith(`${ord.invoice_number}-R`))
+        .reduce((sum, r) => sum + (r.total || 0), 0);
+
+      const remaining = (ord.total || 0) - (ord.paid_amount || 0) - (ord.recovered_amount || 0) - returnedAmount;
+      return Number(Math.max(remaining, 0).toFixed(2));
+    };
+
+    const ordersToRecover = orders.filter(ord => getOrderActualDue(ord) > 0);
 
     // 🔹 Compute total due across these invoices
-    const totalDue = orders.reduce(
-      (acc, ord) => acc + (ord.due_amount || 0),
+    const totalDue = ordersToRecover.reduce(
+      (acc, ord) => acc + getOrderActualDue(ord),
       0,
     );
-    if (total_recovery_amount > totalDue) {
+
+    if (orderIds && orderIds.length > 0 && Math.abs(total_recovery_amount - totalDue) > 0.01) {
       await session.abortTransaction();
       return sendError(
         res,
-        "Recovery exceeds total due for selected invoices",
+        `Recovery amount (Rs ${total_recovery_amount}) must exactly equal the total due for selected invoices (Rs ${totalDue.toFixed(2)})`,
         400,
       );
     }
 
     // 🔹 Distribute the recovery across invoices in order sequence (FIFO by created date)
-    const sortedOrders = orders.sort(
+    const sortedOrders = ordersToRecover.sort(
       (a, b) => new Date(a.createdAt) - new Date(b.createdAt),
     );
     let remaining = total_recovery_amount;
@@ -1783,15 +1905,21 @@ export const addRecover = async (req, res) => {
     for (const order of sortedOrders) {
       if (remaining <= 0) break;
 
-      const payment = Math.min(order.due_amount, remaining);
+      const orderDue = getOrderActualDue(order);
+      if (orderDue <= 0) continue;
 
-      order.due_amount = Number((order.due_amount - payment).toFixed(2));
-      order.recovered_amount = (order.recovered_amount || 0) + payment;
+      const payment = Math.min(orderDue, remaining);
+
+      order.recovered_amount = Number(((order.recovered_amount || 0) + payment).toFixed(2));
+      order.due_amount = Number(Math.max(0, order.due_amount - payment).toFixed(2));
       order.recovered_date = recovery_date || new Date();
       order.recovered_by = recovered_by;
-      if (order.due_amount <= 0) {
+      
+      const invoiceRemaining = (order.total || 0) - (order.paid_amount || 0) - order.recovered_amount;
+      if (invoiceRemaining <= 0) {
         order.status = "recovered";
-        order.due_amount = 0;
+      } else if (order.recovered_amount > 0 || order.paid_amount > 0) {
+        order.status = "partially_recovered";
       }
       await order.save({ session });
 
@@ -1806,12 +1934,17 @@ export const addRecover = async (req, res) => {
     }
 
     // 🔹 Adjust supplier payable balance
-    supplier.pay = (supplier.pay || 0) - total_recovery_amount;
-    if (supplier.pay < 0) supplier.pay = 0;
+    const prevPay = supplier.pay || 0;
+    const prevReceive = supplier.receive || 0;
+    let net = prevPay - prevReceive - total_recovery_amount;
+    if (net >= 0) {
+      supplier.pay = Number(net.toFixed(2));
+      supplier.receive = 0;
+    } else {
+      supplier.pay = 0;
+      supplier.receive = Number(Math.abs(net).toFixed(2));
+    }
     await supplier.save({ session });
-
-    // 🔹 Optionally log entries in a Recovery collection
-    // await Recovery.insertMany(recoveries, { session });
 
     await session.commitTransaction();
     session.endSession();
@@ -1835,7 +1968,7 @@ const getAllBookersSales = async (req, res) => {
   try {
     // ✅ Only sales that must have a booker_id
     const filter = {
-      type: "sale",
+      type: { $in: ["sale", "sale_return"] },
       booker_id: { $exists: true, $ne: null },
     };
 
@@ -2047,7 +2180,7 @@ export const completeSale = async (req, res) => {
        ===================================================== */
     // Get ALL completed sale invoices
     const completedInvoices = await Order.find({
-      status: "completed",
+      status: { $in: ["completed", "recovered", "partially_returned", "partially_recovered"] },
       type: "sale",
       invoice_number: { $regex: /^SALE-\d+$/ },
     })
@@ -2132,7 +2265,7 @@ export const completeSale = async (req, res) => {
     );
 
     // ✅ Override due_amount with calculated due_amount and update createdAt
-    sale.due_amount = updatedPay - updatedReceive;
+    sale.due_amount = Number((updatedPay - updatedReceive).toFixed(2));
     sale.createdAt = new Date();
 
     /* =====================================================
@@ -2198,9 +2331,9 @@ export const completeSale = async (req, res) => {
         orderItem.total = item.total;
         orderItem.expiry = expiryValue;
         orderItem.profit = totalProfitForItem;
-        orderItem.retail_price = product.retail_price;
-        orderItem.trade_price = product.trade_price;
-        orderItem.sales_tax = product.sales_tax;
+        orderItem.retail_price = batch ? (batch.retail_price ?? product.retail_price) : product.retail_price;
+        orderItem.trade_price = batch ? (batch.trade_price ?? product.trade_price) : product.trade_price;
+        orderItem.sales_tax = batch ? (batch.sales_tax ?? product.sales_tax) : product.sales_tax;
         await orderItem.save({ session });
       } else {
         // Create new order item
@@ -2216,9 +2349,9 @@ export const completeSale = async (req, res) => {
               discount: item.discount || 0,
               total: item.total,
               profit: totalProfitForItem,
-              retail_price: product.retail_price,
-              trade_price: product.trade_price,
-              sales_tax: product.sales_tax,
+              retail_price: batch ? (batch.retail_price ?? product.retail_price) : product.retail_price,
+              trade_price: batch ? (batch.trade_price ?? product.trade_price) : product.trade_price,
+              sales_tax: batch ? (batch.sales_tax ?? product.sales_tax) : product.sales_tax,
             },
           ],
           { session },
@@ -2557,7 +2690,7 @@ const editSale = async (req, res) => {
 
       if (isDraftInvoice) {
         const completedInvoices = await Order.find({
-          status: "completed",
+          status: { $in: ["completed", "recovered", "partially_returned", "partially_recovered"] },
           type: "sale",
           invoice_number: { $regex: /^SALE-\d+$/ },
         })
@@ -2678,9 +2811,9 @@ const editSale = async (req, res) => {
               discount: item.discount || 0,
               total: item.total,
               profit: totalProfitForItem,
-              retail_price: product.retail_price,
-              trade_price: product.trade_price,
-              sales_tax: product.sales_tax,
+              retail_price: batch ? (batch.retail_price ?? product.retail_price) : product.retail_price,
+              trade_price: batch ? (batch.trade_price ?? product.trade_price) : product.trade_price,
+              sales_tax: batch ? (batch.sales_tax ?? product.sales_tax) : product.sales_tax,
             },
           ],
           { session }

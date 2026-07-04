@@ -36,7 +36,7 @@ const orderSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["completed", "skipped", "returned", "recovered"],
+      enum: ["completed", "skipped", "returned", "recovered", "partially_returned", "partially_recovered"],
       default: "completed",
     },
   },

@@ -330,6 +330,10 @@ export const getAllProducts = async (req, res) => {
                 discount_per_unit: "$$batch.discount_per_unit",
                 unit_cost: "$$batch.unit_cost",
                 purchase_price: "$$batch.purchase_price",
+                retail_price: "$$batch.retail_price",
+                trade_price: "$$batch.trade_price",
+                wholesale_price: "$$batch.wholesale_price",
+                sales_tax: "$$batch.sales_tax",
                 stock: "$$batch.stock"
               }
             }
@@ -555,6 +559,8 @@ export const getProductById = async (req, res) => {
                 purchase_price: "$$batch.purchase_price",
                 retail_price: "$$batch.retail_price",
                 trade_price: "$$batch.trade_price",
+                wholesale_price: "$$batch.wholesale_price",
+                sales_tax: "$$batch.sales_tax",
                 mrp: "$$batch.mrp"
               }
             }

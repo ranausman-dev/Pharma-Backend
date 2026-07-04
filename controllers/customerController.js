@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import { SupplierModel } from "../models/supplierModel.js";
+import { SupplierLedger } from "../models/supplierLedgerModel.js";
 import { sendError, successResponse } from "../utils/response.js";
 
 export const getAllCustomers = async (req, res) => {
@@ -340,6 +341,7 @@ export const deleteCustomer = async (req, res) => {
     if (!customer) return sendError(res, "Customer not found", 404);
 
     await customer.deleteOne();
+    await SupplierLedger.deleteMany({ supplier_id: req.params.id });
     return successResponse(res, "Customer deleted successfully");
   } catch (error) {
     console.error("Delete Customer Error:", error);

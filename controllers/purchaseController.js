@@ -238,9 +238,6 @@ const createPurchase = async (req, res) => {
                 discount_percentage: Number(finalDiscountPercentage.toFixed(2)),
                 discount_per_unit: Number(finalDiscountPerUnit.toFixed(2)),
                 expiry_date: expiryValue || existingBatch.expiry_date,
-                retail_price: product.retail_price,
-                trade_price: product.trade_price,
-                sales_tax: product.sales_tax
               },
               $inc: { stock: item.units }
             }
@@ -262,6 +259,7 @@ const createPurchase = async (req, res) => {
                 expiry_date: expiryValue,
                 retail_price: product.retail_price,
                 trade_price: product.trade_price,
+                wholesale_price: product.wholesale_price,
                 sales_tax: product.sales_tax
               },
               $set: {
@@ -742,13 +740,36 @@ const returnPurchaseByInvoice = async (req, res) => {
       orderItemsMap[item.batch] = { orderItem, returnTotal };
     }
 
-    // Deduct from supplier credit
-    const newReceive = Math.max((supplierDoc.receive || 0) - totalReturn, 0);
+    // Deduct from supplier credit safely
+    const currentPay = supplierDoc.pay || 0;
+    const currentReceive = supplierDoc.receive || 0;
+    
+    // A purchase return is a debit to the supplier. So it decreases what we owe them (receive) or increases what they owe us (pay).
+    const netPurchaseReturn = currentReceive - currentPay - totalReturn;
+    let updatedPay = 0;
+    let updatedReceive = 0;
+    if (netPurchaseReturn >= 0) {
+      updatedReceive = netPurchaseReturn;
+      updatedPay = 0;
+    } else {
+      updatedReceive = 0;
+      updatedPay = Math.abs(netPurchaseReturn);
+    }
+
     await SupplierModel.findByIdAndUpdate(
       supplierDoc._id,
-      { receive: newReceive },
+      { pay: Number(updatedPay.toFixed(2)), receive: Number(updatedReceive.toFixed(2)) },
       { session }
     );
+
+    // Reduce original purchase order's due_amount and mark as recovered if fully paid/returned
+    const oldPurchaseDueAmount = purchaseOrder.due_amount || 0;
+    const newPurchaseDueAmount = Math.max(0, oldPurchaseDueAmount - totalReturn);
+    purchaseOrder.due_amount = Number(newPurchaseDueAmount.toFixed(2));
+    if (purchaseOrder.due_amount <= 0) {
+      purchaseOrder.status = "recovered";
+    }
+    await purchaseOrder.save({ session });
 
     // Create return order
     const returnOrder = await Order.create(
@@ -1393,9 +1414,6 @@ const editPurchase = async (req, res) => {
                     discount_per_unit: Number(newDiscountPerUnit.toFixed(2)),
                     discount_percentage: Number(newDiscountPercentage.toFixed(2)),
                     expiry_date: expiryValue || existingBatch.expiry_date,
-                    retail_price: product.retail_price,
-                    trade_price: product.trade_price,
-                    sales_tax: product.sales_tax
                   },
                   $inc: { stock: Number(item.units || 0) },
                 },
@@ -1415,6 +1433,7 @@ const editPurchase = async (req, res) => {
                     purchase_price: item.unit_price,
                     retail_price: product.retail_price,
                     trade_price: product.trade_price,
+                    wholesale_price: product.wholesale_price,
                     sales_tax: product.sales_tax
                   },
                   $set: {
@@ -1807,7 +1826,6 @@ export const completePurchase = async (req, res) => {
 
     const supplierNewReceive = (supplierDoc.receive || 0) + (completedTotal - completedPaid);
     const supplierPay = supplierDoc.pay || 0;
-    const calculatedDueAmount = supplierNewReceive - supplierPay;
 
     await SupplierModel.findByIdAndUpdate(
       purchase.supplier_id,
@@ -1818,8 +1836,8 @@ export const completePurchase = async (req, res) => {
       { session }
     );
 
-    // ✅ Override due_amount with calculated due_amount and update createdAt
-    purchase.due_amount = calculatedDueAmount;
+    // ✅ Override due_amount with actual purchase due_amount and update createdAt
+    purchase.due_amount = completedTotal - completedPaid;
     purchase.createdAt = new Date();
 
     /* =====================================================
@@ -1921,6 +1939,10 @@ export const completePurchase = async (req, res) => {
                 batch_number: item.batch,
                 purchase_price: item.unit_price,
                 expiry_date: expiryValue,
+                retail_price: product.retail_price,
+                trade_price: product.trade_price,
+                wholesale_price: product.wholesale_price,
+                sales_tax: product.sales_tax
               },
               $set: {
                 unit_cost: item.units > 0 ? item.total / item.units : 0,

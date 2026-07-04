@@ -38,6 +38,10 @@ const batchSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  wholesale_price: {
+    type: Number,
+    default: 0
+  },
   sales_tax: {
     type: Number,
     default: 0

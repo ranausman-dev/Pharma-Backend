@@ -1,5 +1,6 @@
 import { SupplierModel } from "../models/supplierModel.js";
 import { OrderModel } from "../models/orderModel.js";
+import { SupplierLedger } from "../models/supplierLedgerModel.js";
 import { sendError, successResponse } from "../utils/response.js";
 
 export const getAllSuppliers = async (req, res) => {
@@ -307,6 +308,7 @@ export const deleteSupplier = async (req, res) => {
     if (!supplier) return sendError(res, "Supplier not found", 404);
 
     await supplier.deleteOne();
+    await SupplierLedger.deleteMany({ supplier_id: id });
     return successResponse(res, "Supplier deleted successfully");
   } catch (error) {
     console.error("Delete Supplier Error:", error);
@@ -358,9 +360,38 @@ export const searchSuppliers = async (req, res) => {
   }
 };
 
+const adjustSupplierBalanceInPlace = (supplier, debit, credit) => {
+  const netDebit = debit - credit;
+  
+  if (netDebit > 0) {
+    if (supplier.receive > 0) {
+      if (netDebit >= supplier.receive) {
+        supplier.pay += netDebit - supplier.receive;
+        supplier.receive = 0;
+      } else {
+        supplier.receive -= netDebit;
+      }
+    } else {
+      supplier.pay += netDebit;
+    }
+  } else if (netDebit < 0) {
+    const netCredit = Math.abs(netDebit);
+    if (supplier.pay > 0) {
+      if (netCredit >= supplier.pay) {
+        supplier.receive += netCredit - supplier.pay;
+        supplier.pay = 0;
+      } else {
+        supplier.pay -= netCredit;
+      }
+    } else {
+      supplier.receive += netCredit;
+    }
+  }
+};
+
 export const addSupplierBalance = async (req, res) => {
   try {
-    const { supplierId, balanceType, amount } = req.body;
+    const { supplierId, balanceType, amount, description, date } = req.body;
 
     if (!supplierId || !balanceType || typeof amount !== "number") {
       return sendError(
@@ -373,43 +404,21 @@ export const addSupplierBalance = async (req, res) => {
     const supplier = await SupplierModel.findById(supplierId);
     if (!supplier) return sendError(res, "Supplier not found", 404);
 
-    if (balanceType === "pay") {
-      if (supplier.receive > 0) {
-        if (amount >= supplier.receive) {
-          // Cancel receive fully, leftover goes to pay
-          supplier.pay += amount - supplier.receive;
-          supplier.receive = 0;
-        } else {
-          // Reduce receive only
-          supplier.receive -= amount;
-        }
-      } else {
-        supplier.pay += amount;
-      }
-    } else if (balanceType === "receive") {
-      if (supplier.pay > 0) {
-        if (amount >= supplier.pay) {
-          // Cancel pay fully, leftover goes to receive
-          supplier.receive += amount - supplier.pay;
-          supplier.pay = 0;
-        } else {
-          // Reduce pay only
-          supplier.pay -= amount;
-        }
-      } else {
-        supplier.receive += amount;
-      }
-    } else {
-      return sendError(
-        res,
-        "balanceType must be either 'pay' or 'receive'",
-        400,
-      );
-    }
+    const debit = balanceType === "pay" ? amount : 0;
+    const credit = balanceType === "receive" ? amount : 0;
+    adjustSupplierBalanceInPlace(supplier, debit, credit);
+
+    const newEntry = await SupplierLedger.create({
+      supplier_id: supplierId,
+      date: date ? new Date(date) : undefined,
+      description: description || (balanceType === "pay" ? "Manual Debit Adjustment" : "Manual Credit Adjustment"),
+      debit,
+      credit,
+    });
 
     await supplier.save();
 
-    return successResponse(res, "Balance updated successfully", { supplier });
+    return successResponse(res, "Balance updated successfully", { supplier, ledgerEntry: newEntry });
   } catch (error) {
     console.error("Add Supplier Balance Error:", error);
     return sendError(res, "Failed to update supplier balance", 500);
@@ -435,7 +444,21 @@ export const getSupplierLedger = async (req, res) => {
       .sort({ createdAt: 1 })
       .lean();
 
+    const manualEntries = await SupplierLedger.find({ supplier_id: id }).lean();
+
     let ledger = [];
+
+    // 1. Manual Ledger entries
+    manualEntries.forEach((entry) => {
+      ledger.push({
+        _id: entry._id.toString(),
+        date: entry.date,
+        description: entry.description,
+        debit: entry.debit || 0,
+        credit: entry.credit || 0,
+        isManual: true,
+      });
+    });
 
     // 1. Opening Balance entry
     const openingDate = party.createdAt || new Date(0);
@@ -460,7 +483,7 @@ export const getSupplierLedger = async (req, res) => {
           _id: `${order._id}_sale`,
           order_id: order._id,
           date,
-          description: `Sale Invoice (Invoice #: ${order.invoice_number})`,
+          description: `${order.invoice_number}`,
           debit: order.total || 0,
           credit: 0,
           type: order.type,
@@ -472,7 +495,7 @@ export const getSupplierLedger = async (req, res) => {
             _id: `${order._id}_payment`,
             order_id: order._id,
             date,
-            description: `Payment Received (Invoice #: ${order.invoice_number})`,
+            description: `Payment Received (${order.invoice_number})`,
             debit: 0,
             credit: order.paid_amount,
             type: order.type,
@@ -485,7 +508,7 @@ export const getSupplierLedger = async (req, res) => {
             _id: `${order._id}_recovery`,
             order_id: order._id,
             date: order.recovered_date || order.updatedAt || date,
-            description: `Recovery Payment (Invoice #: ${order.invoice_number})`,
+            description: `Recovery Payment (${order.invoice_number})`,
             debit: 0,
             credit: order.recovered_amount,
             type: order.type,
@@ -497,7 +520,7 @@ export const getSupplierLedger = async (req, res) => {
           _id: `${order._id}_purchase`,
           order_id: order._id,
           date,
-          description: `Purchase Invoice (Purchase #: ${order.purchase_number || order.invoice_number})`,
+          description: `${order.purchase_number || order.invoice_number}`,
           debit: 0,
           credit: order.total || 0,
           type: order.type,
@@ -509,7 +532,7 @@ export const getSupplierLedger = async (req, res) => {
             _id: `${order._id}_payment`,
             order_id: order._id,
             date,
-            description: `Payment Paid (Purchase #: ${order.purchase_number || order.invoice_number})`,
+            description: `Payment Paid (${order.purchase_number || order.invoice_number})`,
             debit: order.paid_amount,
             credit: 0,
             type: order.type,
@@ -520,7 +543,7 @@ export const getSupplierLedger = async (req, res) => {
           _id: `${order._id}_return`,
           order_id: order._id,
           date,
-          description: `Sale Return (Invoice #: ${order.invoice_number})`,
+          description: `Sale Return (${order.invoice_number})`,
           debit: 0,
           credit: order.total || 0,
           type: order.type,
@@ -530,7 +553,7 @@ export const getSupplierLedger = async (req, res) => {
           _id: `${order._id}_return`,
           order_id: order._id,
           date,
-          description: `Purchase Return (Invoice #: ${order.invoice_number})`,
+          description: `Purchase Return (${order.invoice_number})`,
           debit: order.total || 0,
           credit: 0,
           type: order.type,
@@ -610,6 +633,166 @@ export const getSupplierLedger = async (req, res) => {
   }
 };
 
+export const editSupplierLedgerEntry = async (req, res) => {
+  try {
+    const { entryId } = req.params;
+    const { date, description, debit, credit } = req.body;
+
+    const entry = await SupplierLedger.findById(entryId);
+    if (!entry) return sendError(res, "Ledger entry not found", 404);
+
+    const supplier = await SupplierModel.findById(entry.supplier_id);
+    if (!supplier) return sendError(res, "Supplier/Customer not found", 404);
+
+    // 1. Reverse old
+    const oldDebit = entry.debit || 0;
+    const oldCredit = entry.credit || 0;
+    adjustSupplierBalanceInPlace(supplier, oldCredit, oldDebit);
+
+    // 2. Apply new
+    const newDebit = typeof debit === "number" ? debit : oldDebit;
+    const newCredit = typeof credit === "number" ? credit : oldCredit;
+    adjustSupplierBalanceInPlace(supplier, newDebit, newCredit);
+
+    // 3. Save entry
+    entry.date = date ? new Date(date) : entry.date;
+    entry.description = description !== undefined ? description : entry.description;
+    entry.debit = newDebit;
+    entry.credit = newCredit;
+
+    await entry.save();
+    await supplier.save();
+
+    return successResponse(res, "Ledger entry updated successfully", { entry, supplier });
+  } catch (error) {
+    console.error("Edit Supplier Ledger Error:", error);
+    return sendError(res, "Failed to edit ledger entry", 500);
+  }
+};
+
+export const deleteSupplierLedgerEntry = async (req, res) => {
+  try {
+    const { entryId } = req.params;
+
+    const entry = await SupplierLedger.findById(entryId);
+    if (!entry) return sendError(res, "Ledger entry not found", 404);
+
+    const supplier = await SupplierModel.findById(entry.supplier_id);
+    if (!supplier) return sendError(res, "Supplier/Customer not found", 404);
+
+    // Reverse old
+    const oldDebit = entry.debit || 0;
+    const oldCredit = entry.credit || 0;
+    adjustSupplierBalanceInPlace(supplier, oldCredit, oldDebit);
+
+    await entry.deleteOne();
+    await supplier.save();
+
+    return successResponse(res, "Ledger entry deleted successfully", { supplier });
+  } catch (error) {
+    console.error("Delete Supplier Ledger Error:", error);
+    return sendError(res, "Failed to delete ledger entry", 500);
+  }
+};
+
+export const recalculateSupplierBalance = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const supplier = await SupplierModel.findById(id);
+    if (!supplier) return sendError(res, "Supplier/Customer not found", 404);
+
+    const typeOfLedger = supplier.role === "customer" ? "customer" : "supplier";
+
+    // 1. Fetch all completed/returned/recovered orders
+    const orderQuery = {
+      supplier_id: id,
+      type: { $in: ["purchase", "sale", "purchase_return", "sale_return"] },
+      status: { $in: ["completed", "returned", "recovered"] },
+    };
+    const orders = await OrderModel.find(orderQuery).lean();
+
+    // 2. Fetch manual ledger entries
+    const manualEntries = await SupplierLedger.find({ supplier_id: id }).lean();
+
+    // 3. Compute Net Balance
+    let totalDebit = 0;
+    let totalCredit = 0;
+
+    // Opening Balance
+    if (supplier.opening_balance && supplier.opening_balance > 0) {
+      if (supplier.balanceType === "pay") {
+        totalDebit += supplier.opening_balance;
+      } else if (supplier.balanceType === "receive") {
+        totalCredit += supplier.opening_balance;
+      }
+    }
+
+    // Manual entries
+    manualEntries.forEach((entry) => {
+      totalDebit += entry.debit || 0;
+      totalCredit += entry.credit || 0;
+    });
+
+    // Orders
+    orders.forEach((order) => {
+      if (order.type === "sale") {
+        totalDebit += order.total || 0;
+        if (order.paid_amount && order.paid_amount > 0) {
+          totalCredit += order.paid_amount;
+        }
+        if (order.recovered_amount && order.recovered_amount > 0) {
+          totalCredit += order.recovered_amount;
+        }
+      } else if (order.type === "purchase") {
+        totalCredit += order.total || 0;
+        if (order.paid_amount && order.paid_amount > 0) {
+          totalDebit += order.paid_amount;
+        }
+      } else if (order.type === "sale_return") {
+        totalCredit += order.total || 0;
+      } else if (order.type === "purchase_return") {
+        totalDebit += order.total || 0;
+      }
+    });
+
+    let newPay = 0;
+    let newReceive = 0;
+
+    if (typeOfLedger === "customer") {
+      const netDebit = totalDebit - totalCredit;
+      if (netDebit > 0) {
+        newPay = netDebit;
+        newReceive = 0;
+      } else if (netDebit < 0) {
+        newPay = 0;
+        newReceive = Math.abs(netDebit);
+      }
+    } else {
+      // supplier
+      const netCredit = totalCredit - totalDebit;
+      if (netCredit > 0) {
+        newPay = 0;
+        newReceive = netCredit;
+      } else if (netCredit < 0) {
+        newPay = Math.abs(netCredit);
+        newReceive = 0;
+      }
+    }
+
+    supplier.pay = Number(newPay.toFixed(2));
+    supplier.receive = Number(newReceive.toFixed(2));
+    await supplier.save();
+
+    return successResponse(res, "Balance recalculated successfully", {
+      pay: supplier.pay,
+      receive: supplier.receive,
+    });
+  } catch (error) {
+    console.error("Recalculate Supplier Balance Error:", error);
+    return sendError(res, "Failed to recalculate balance", 500);
+  }
+};
+
 const supplierController = {
   getAllSuppliers,
   getSupplierById,
@@ -622,6 +805,9 @@ const supplierController = {
   addSupplierBalance,
   getAllActiveSuppliersAndCustomers,
   getSupplierLedger,
+  editSupplierLedgerEntry,
+  deleteSupplierLedgerEntry,
+  recalculateSupplierBalance,
 };
 
 export default supplierController;
