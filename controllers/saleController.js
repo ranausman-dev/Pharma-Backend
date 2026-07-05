@@ -12,6 +12,7 @@ import mongoose from "mongoose";
 import adjustBalance from "../utils/adjustBalance.js";
 import Investor from "../models/investorModel.js";
 import investorProfit from "../models/investorProfit.js";
+import { UserLedger } from "../models/userLedgerModel.js";
 
 const applyLedgerEntry = async (investor, type, amount, note, date, session) => {
   if (!amount || amount <= 0) return;
@@ -341,6 +342,23 @@ const createSale = async (req, res) => {
       { profit: totalOrderProfit },
       { session },
     );
+
+    // ✅ Auto-credit employee (booker) profit on sale
+    if (booker_id && totalOrderProfit > 0) {
+      const prevEntries = await UserLedger.find({ user_id: booker_id }).sort({ createdAt: 1 });
+      const runningCredit = prevEntries.reduce((sum, e) => sum + (e.credit || 0) - (e.debit || 0), 0);
+      const newBalance = runningCredit + totalOrderProfit;
+      await UserLedger.create([{
+        user_id: booker_id,
+        description: `Profit credit for Invoice: ${invoice_number}`,
+        credit: Number(totalOrderProfit.toFixed(2)),
+        debit: 0,
+        incentive_amount: Number(totalOrderProfit.toFixed(2)),
+        order_id: invoice_number,
+        date: new Date(),
+        total_balance: `${Math.abs(newBalance).toFixed(2)} ${newBalance >= 0 ? "CR" : "DB"}`
+      }], { session });
+    }
 
     // 8. Adjust supplier balances
     function adjustPayReceive(
@@ -1106,6 +1124,24 @@ const returnSaleByInvoice = async (req, res) => {
     // Update return order with calculated returnedProfit
     await Order.updateOne({ _id: returnOrder[0]._id }, { profit: returnedProfit }).session(session);
 
+    // ✅ Auto-debit employee (booker) profit on sale return
+    if (saleOrder.booker_id && returnedProfit > 0) {
+      const bookerIdStr = saleOrder.booker_id.toString();
+      const prevEntries = await UserLedger.find({ user_id: bookerIdStr }).sort({ createdAt: 1 });
+      const runningCredit = prevEntries.reduce((sum, e) => sum + (e.credit || 0) - (e.debit || 0), 0);
+      const newBalance = runningCredit - returnedProfit;
+      await UserLedger.create([{
+        user_id: bookerIdStr,
+        description: `Profit deduction for return Invoice: ${invoice_number}-R`,
+        credit: 0,
+        debit: Number(returnedProfit.toFixed(2)),
+        incentive_amount: Number(returnedProfit.toFixed(2)),
+        order_id: `${invoice_number}-R`,
+        date: new Date(),
+        total_balance: `${Math.abs(newBalance).toFixed(2)} ${newBalance >= 0 ? "CR" : "DB"}`
+      }], { session });
+    }
+
     // Update original sale order status
     const prevReturnedTotal = returnOrders.reduce((sum, r) => sum + (r.total || 0), 0);
     const totalReturned = prevReturnedTotal + totalReturnWithTax;
@@ -1663,10 +1699,15 @@ const getBookerSales = async (req, res) => {
 
     // ✅ Fetch all sales for this booker
     const sales = await Order.find({ booker_id: bookerId, type: { $in: ["sale", "sale_return"] } })
-      .populate("supplier_id", "company_name")
+      .populate({
+        path: "supplier_id",
+        select: "company_name city area_id",
+        populate: { path: "area_id", select: "name" }
+      })
       .populate("booker_id", "name email")
       .sort({ createdAt: -1 })
       .lean();
+
 
     // Get order items
     const orderIds = sales.map((s) => s._id);

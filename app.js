@@ -22,6 +22,7 @@ import estimatedSaleRoute from "./routes/estimatedSaleRoutes.js";
 import permissionRoute from "./routes/permissionRoutes.js";
 import investorRoute from "./routes/investorRoute.js";
 import uploadRoutes from "./routes/uploadRoutes.js";
+import bulkCashRecoveryRoute from "./routes/bulkCashRecoveryRoutes.js";
 
 import cors from 'cors';
 
@@ -79,6 +80,7 @@ app.use("/api/free-sale", apiLimiter, freeSaleRoute);
 app.use("/api/estimated-sale", apiLimiter, estimatedSaleRoute);
 app.use("/api/permissions", apiLimiter, permissionRoute);
 app.use("/api/investor", apiLimiter, investorRoute);
+app.use("/api/bulk-recovery", apiLimiter, bulkCashRecoveryRoute);
 
 app.use("/uploads", express.static("uploads")); // Serve uploaded images
 app.use("/api/upload", uploadRoutes);
