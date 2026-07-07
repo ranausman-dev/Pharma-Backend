@@ -94,7 +94,14 @@ export const createBulkRecovery = async (req, res) => {
 
     // Populate for response
     const populated = await BulkCashRecovery.findById(recovery._id)
-      .populate("customer_id", "company_name city pay receive")
+      .populate({
+        path: "customer_id",
+        select: "company_name city pay receive area_id",
+        populate: {
+          path: "area_id",
+          select: "name",
+        },
+      })
       .populate("booker_id", "name");
 
     return successResponse(res, "Bulk recovery created successfully", { recovery: populated }, 201);
@@ -116,7 +123,14 @@ export const getBulkRecoveries = async (req, res) => {
     if (booker_id) filter.booker_id = booker_id;
 
     const recoveries = await BulkCashRecovery.find(filter)
-      .populate("customer_id", "company_name city pay receive")
+      .populate({
+        path: "customer_id",
+        select: "company_name city pay receive area_id",
+        populate: {
+          path: "area_id",
+          select: "name",
+        },
+      })
       .populate("booker_id", "name")
       .sort({ createdAt: -1 });
 
@@ -216,7 +230,14 @@ export const editBulkRecovery = async (req, res) => {
     await session.commitTransaction();
 
     const populated = await BulkCashRecovery.findById(id)
-      .populate("customer_id", "company_name city pay receive")
+      .populate({
+        path: "customer_id",
+        select: "company_name city pay receive area_id",
+        populate: {
+          path: "area_id",
+          select: "name",
+        },
+      })
       .populate("booker_id", "name");
 
     return successResponse(res, "Recovery updated successfully", { recovery: populated });
