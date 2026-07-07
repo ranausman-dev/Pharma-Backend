@@ -1,6 +1,7 @@
 import { SupplierModel } from "../models/supplierModel.js";
 import { OrderModel } from "../models/orderModel.js";
 import { SupplierLedger } from "../models/supplierLedgerModel.js";
+import { BulkCashRecovery } from "../models/bulkCashRecoveryModel.js";
 import { sendError, successResponse } from "../utils/response.js";
 
 export const getAllSuppliers = async (req, res) => {
@@ -445,6 +446,7 @@ export const getSupplierLedger = async (req, res) => {
       .lean();
 
     const manualEntries = await SupplierLedger.find({ supplier_id: id }).lean();
+    const cashRecoveries = await BulkCashRecovery.find({ customer_id: id, status: "active" }).lean();
 
     let ledger = [];
 
@@ -457,6 +459,18 @@ export const getSupplierLedger = async (req, res) => {
         debit: entry.debit || 0,
         credit: entry.credit || 0,
         isManual: true,
+      });
+    });
+
+    // 2. Cash Recovery entries
+    cashRecoveries.forEach((rec) => {
+      ledger.push({
+        _id: rec._id.toString(),
+        date: rec.date,
+        description: `Cash Recovery (${rec.cash_id || "N/A"})${rec.note ? ` - ${rec.note}` : ""}`,
+        debit: 0,
+        credit: rec.amount || 0,
+        type: "cash_recovery",
       });
     });
 

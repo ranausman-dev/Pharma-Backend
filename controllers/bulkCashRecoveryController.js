@@ -48,17 +48,6 @@ export const createBulkRecovery = async (req, res) => {
       return sendError(res, "Booker (employee) not found", 404);
     }
 
-    // Check amount does not exceed customer's current debit (pay balance)
-    const customerDebit = (customer.pay || 0) - (customer.receive || 0);
-    if (amount > customerDebit + 0.01) {
-      await session.abortTransaction();
-      return sendError(
-        res,
-        `Amount (${amount}) exceeds customer's outstanding debit (${customerDebit.toFixed(2)})`,
-        400
-      );
-    }
-
     // Generate cash ID
     const cash_id = await generateCashId();
 
@@ -195,16 +184,6 @@ export const editBulkRecovery = async (req, res) => {
     if (!newCustomer) {
       await session.abortTransaction();
       return sendError(res, "New customer not found", 404);
-    }
-
-    const newDebit = (newCustomer.pay || 0) - (newCustomer.receive || 0);
-    if (newAmount > newDebit + 0.01) {
-      await session.abortTransaction();
-      return sendError(
-        res,
-        `Amount (${newAmount}) exceeds new customer's outstanding debit (${newDebit.toFixed(2)})`,
-        400
-      );
     }
 
     // Reduce new customer's debit
