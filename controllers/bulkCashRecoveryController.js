@@ -17,7 +17,7 @@ const generateCashId = async () => {
     const num = parseInt(last.cash_id.replace("CASH-", ""), 10);
     if (!isNaN(num)) nextNum = num + 1;
   }
-  return `CASH-${String(nextNum).padStart(4, "0")}`;
+  return `CASH-${nextNum}`;
 };
 
 // ── CREATE ──────────────────────────────────────────────────────────────────
