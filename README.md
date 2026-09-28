@@ -1,0 +1,58 @@
+# Pharma Management System - Backend
+
+A robust Pharmacy Management System backend built with Node.js and Express, designed for secure inventory tracking, batch expiry management, and comprehensive financial ledger auditing.
+
+## 🚀 Key Features
+- **Comprehensive Inventory**: Track products, generics, companies, and batch-wise stock.
+- **Expiry Management**: Specialized batch tracking to prevent expired medicine sales.
+- **Sales & Purchase**: Full workflow for purchasing from suppliers and selling to customers.
+- **Financial Ledger**: Account-wise tracking of transactions for users, customers, and suppliers.
+- **Investor Management**: Track capital investments and automate profit distribution.
+- **Role-Based Security**: Granular permissions to control access to sensitive modules.
+
+## 🛠 Technology Stack
+- **Node.js**: Server-side runtime environment.
+- **Express.js**: Web framework for building APIs.
+- **MongoDB & Mongoose**: NoSQL database and ODM for data management.
+- **JWT**: Secure token-based authentication.
+- **Bcryptjs**: Password hashing for security.
+- **Multer**: Handling file uploads (product images).
+- **Helmet**: Security middleware for setting various HTTP headers.
+
+## 📁 Project Structure
+- `/api`: Vercel serverless function entry points.
+- `/config`: Database connection and environment configuration.
+- `/controllers`: Core business logic for endpoints.
+- `/middleware`: Authentication and error handling logic.
+- `/models`: Mongoose schemas defining data structures.
+- `/routes`: API route definitions.
+- `/utils`: Helper functions and shared utilities.
+
+## 🚦 Getting Started
+
+### Prerequisites
+- Node.js (v18 or higher)
+- MongoDB (local or Atlas)
+
+### Installation
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
+2. Set up environment variables in a `.env` file:
+   ```env
+   PORT=5000
+   MONGO_URI=your_mongodb_connection_string
+   JWT_SECRET=your_secret_key
+   ```
+3. Start the development server:
+   ```bash
+   npm run dev
+   ```
+
+## 📜 API Documentation
+All API endpoints are prefixed with `/api`.
+- `POST /api/auth/login` - User authentication.
+- `GET /api/product` - List products with stock info.
+- `POST /api/purchase` - Record a new stock purchase.
+- `POST /api/sale` - Create a new sale transaction.
